@@ -1,5 +1,6 @@
 import { DownloadsArchivePort } from '@/utils/archive';
 import { systemClock } from '@/utils/clock';
+import { systemDelay } from '@/utils/delay';
 import type {
   ExportDocumentMessage,
   ExportDocumentResponse,
@@ -7,8 +8,8 @@ import type {
   ListDocumentsResponse,
 } from '@/utils/messages';
 import { summarizeRow } from '@/utils/portal';
-import { runOne, type RunPortalPort } from '@/utils/run';
-import { getSettings, isFiled, markFiled } from '@/utils/store';
+import { run, type RunPortalPort } from '@/utils/run';
+import { cacheEracun, getSettings, isFiled, markFiled, pruneEracunCache } from '@/utils/store';
 
 document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
   <h1>EMR</h1>
@@ -86,16 +87,17 @@ preuzmiButton.addEventListener('click', async () => {
   status.textContent = 'Preuzimanje…';
 
   try {
-    const result = await runOne({
+    const report = await run({
       portal: relayPortalPort,
       archive: new DownloadsArchivePort(),
-      store: { getSettings, isFiled, markFiled },
+      store: { getSettings, isFiled, markFiled, cacheEracun, pruneEracunCache },
       clock: systemClock,
+      delay: systemDelay,
     });
 
-    status.textContent = result.filed
-      ? `Zapisan dokument ${result.documentId}.`
-      : 'Nema novih dokumenata za preuzimanje.';
+    status.textContent =
+      `Zapisano: ${report.filed.length}, preskočeno: ${report.skipped.length}, ` +
+      `neuspjelo: ${report.failed.length}.`;
   } catch (error) {
     status.textContent = `Greška: ${(error as Error).message}`;
   } finally {

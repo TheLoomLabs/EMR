@@ -45,3 +45,89 @@ export async function markFiled(id: number, filedAt: number): Promise<void> {
   const filed = await filedItem.getValue();
   await filedItem.setValue({ ...filed, [id]: filedAt });
 }
+
+/** Base64-encodes in fixed-size chunks rather than `btoa(String.fromCharCode(...bytes))` in one
+ * call, which blows the call stack on anything but a small file (utils/archive.ts has the same
+ * helper for the same reason — writing to storage, like writing to disk, needs a string). */
+function toBase64(bytes: Uint8Array): string {
+  const CHUNK_SIZE = 0x8000;
+  let binary = '';
+  for (let offset = 0; offset < bytes.length; offset += CHUNK_SIZE) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + CHUNK_SIZE));
+  }
+  return btoa(binary);
+}
+
+function fromBase64(base64: string): Uint8Array {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+interface CachedEracun {
+  bytes: string; // base64
+  cachedAt: number;
+}
+
+/** The eRačun XML cache (issue #1's Implementation Decisions → State; issue #9): bytes cached
+ * at download time, keyed by Document `id`, pruned after 24 months. Not an optimisation — trap
+ * 1 means the extension can never read the Archive back, so this cache is the only way the
+ * Bundle (a later issue) can ever get an already-filed Document's XML bytes.
+ *
+ * One storage item per Document id, not one item holding every entry — this cache runs to the
+ * "low hundreds of MB" over 24 months (docs/portal-api.md), and a single-blob item would mean
+ * every Document filed later in the cache's life re-serialises everyone else's bytes just to
+ * add its own. `unlimitedStorage` (wxt.config.ts) already lifts the quota; this is about the
+ * cost of a single write, not the cache's total size. */
+const ERACUN_CACHE_KEY_PREFIX = 'eracun-cache:';
+
+function eracunCacheItem(id: number) {
+  return storage.defineItem<CachedEracun>(`local:${ERACUN_CACHE_KEY_PREFIX}${id}`);
+}
+
+export const ERACUN_CACHE_RETENTION_MONTHS = 24;
+
+/** Caches a Document's eRačun XML bytes, exactly as unpacked from its Export — never
+ * re-serialised (trap 9), since this is the only surviving copy once the Archive write happens. */
+export async function cacheEracun(id: number, bytes: Uint8Array, cachedAt: number): Promise<void> {
+  await eracunCacheItem(id).setValue({ bytes: toBase64(bytes), cachedAt });
+}
+
+export async function getCachedEracun(id: number): Promise<Uint8Array | undefined> {
+  const entry = await eracunCacheItem(id).getValue();
+  return entry === null ? undefined : fromBase64(entry.bytes);
+}
+
+function monthsBefore(epochMillis: number, months: number): number {
+  const date = new Date(epochMillis);
+  date.setUTCMonth(date.getUTCMonth() - months);
+  return date.getTime();
+}
+
+/** Drops every cache entry older than 24 months, run once per Run. This is retention
+ * housekeeping, not a legal Filing date (ADR-0006) — plain wall-clock arithmetic is enough,
+ * unlike trap 8's Zagreb-midnight requirement for what folder a Document lands in.
+ *
+ * Reads the whole local storage area once via `storage.snapshot` to find the cache's keys —
+ * there is no per-item alternative, since the items are defined dynamically by id and nothing
+ * else in local storage enumerates them — then removes only the stale ones by key. */
+export async function pruneEracunCache(now: number): Promise<void> {
+  const cutoff = monthsBefore(now, ERACUN_CACHE_RETENTION_MONTHS);
+  const all = await storage.snapshot('local');
+
+  const staleKeys: `local:${string}`[] = [];
+  for (const [key, value] of Object.entries(all)) {
+    if (!key.startsWith(ERACUN_CACHE_KEY_PREFIX)) continue;
+    const entry = value as CachedEracun;
+    if (entry.cachedAt < cutoff) {
+      staleKeys.push(`local:${key}`);
+    }
+  }
+
+  if (staleKeys.length > 0) {
+    await storage.removeItems(staleKeys);
+  }
+}

@@ -2,8 +2,10 @@ import { zipSync } from 'fflate';
 import { describe, expect, it } from 'vitest';
 import type { ArchivePort } from './archive';
 import type { Clock } from './clock';
-import type { DocumentRow } from './portal';
-import { RunError, runOne, type RunPortalPort, type RunPorts, type RunStore } from './run';
+import type { Delay } from './delay';
+import { listDocuments } from './portal';
+import type { DocumentRow, PortalPort, RawSearchResponse, SearchRequest } from './portal';
+import { EXPORT_DELAY_MS, run, type RunPortalPort, type RunPorts, type RunStore } from './run';
 import type { Settings } from './store';
 
 const XML_HEX = 'deadbeefdeadbeefdeadbeefdeadbeef';
@@ -59,9 +61,18 @@ class FakeArchivePort implements ArchivePort {
   /** Throws once more than this many writes have been attempted, to simulate a write failing
    * partway through a Document (used to test the Filed-only-after-every-write rule). */
   failAfterWrites?: number;
+  /** Documents whose every write should throw, to simulate one Document's Archive being
+   * unreachable while others succeed. */
+  failForDocumentIds = new Set<number>();
 
   async write(path: string, bytes: Uint8Array): Promise<void> {
     this.writeLog.push(path);
+    // Matches this fixture's filename stem exactly (`{date}_{id}-1-1...`) — a plain substring
+    // check on `id` would also match unrelated digits in the date or other ids' stems.
+    const failingId = [...this.failForDocumentIds].find((id) => new RegExp(`_${id}-1-1[._]`).test(path));
+    if (failingId !== undefined) {
+      throw new Error(`simulated failure writing ${path} for document ${failingId}`);
+    }
     if (this.failAfterWrites !== undefined && this.writeLog.length > this.failAfterWrites) {
       throw new Error(`simulated failure writing ${path}`);
     }
@@ -69,8 +80,15 @@ class FakeArchivePort implements ArchivePort {
   }
 }
 
+interface CachedEracun {
+  bytes: Uint8Array;
+  cachedAt: number;
+}
+
 class FakeRunStore implements RunStore {
   private readonly filed = new Map<number, number>();
+  readonly cached = new Map<number, CachedEracun>();
+  readonly pruneCalls: number[] = [];
 
   constructor(private readonly settings: Settings) {}
 
@@ -85,6 +103,14 @@ class FakeRunStore implements RunStore {
   async markFiled(id: number, filedAt: number): Promise<void> {
     this.filed.set(id, filedAt);
   }
+
+  async cacheEracun(id: number, bytes: Uint8Array, cachedAt: number): Promise<void> {
+    this.cached.set(id, { bytes, cachedAt });
+  }
+
+  async pruneEracunCache(now: number): Promise<void> {
+    this.pruneCalls.push(now);
+  }
 }
 
 class FakeClock implements Clock {
@@ -94,8 +120,22 @@ class FakeClock implements Clock {
   }
 }
 
+/** Never actually waits — a Run under test must not spend real wall-clock time sleeping, but
+ * still records every call so the throttling behaviour itself is assertable. */
+class FakeDelay implements Delay {
+  readonly waits: number[] = [];
+  async wait(ms: number): Promise<void> {
+    this.waits.push(ms);
+  }
+}
+
+/** Tracks how many `exportDocument` calls are in flight at once, via a real microtask gap
+ * (not just a synchronous Map lookup) — the only way to catch a Run that dispatched two
+ * Exports without awaiting the first. */
 class FakeRunPortalPort implements RunPortalPort {
   readonly exportCalls: number[] = [];
+  private concurrent = 0;
+  maxConcurrent = 0;
 
   constructor(
     private readonly rows: DocumentRow[],
@@ -107,8 +147,12 @@ class FakeRunPortalPort implements RunPortalPort {
   }
 
   async exportDocument(id: number): Promise<ArrayBuffer> {
+    this.concurrent += 1;
+    this.maxConcurrent = Math.max(this.maxConcurrent, this.concurrent);
     this.exportCalls.push(id);
     const bytes = this.exports.get(id);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    this.concurrent -= 1;
     if (bytes === undefined) {
       throw new Error(`FakeRunPortalPort has no Export fixture for id ${id}`);
     }
@@ -116,24 +160,88 @@ class FakeRunPortalPort implements RunPortalPort {
   }
 }
 
+/** A raw, page-serving fake of the lower-level `PortalPort` (utils/portal.ts), used to exercise
+ * genuine multi-page traversal through `listDocuments` rather than a Run-level fake that hides
+ * paging away. Mirrors utils/portal.test.ts's fake of the same shape. */
+class FakePagingPortalPort implements PortalPort {
+  readonly requests: SearchRequest[] = [];
+  private index = 0;
+
+  constructor(private readonly pages: RawSearchResponse[]) {}
+
+  async searchInbound(request: SearchRequest): Promise<RawSearchResponse> {
+    this.requests.push(request);
+    const page = this.pages[this.index];
+    this.index += 1;
+    if (page === undefined) {
+      throw new Error(`FakePagingPortalPort asked for more pages (call ${this.index}) than it was given`);
+    }
+    return page;
+  }
+}
+
+/** A `RunPortalPort` whose `listDocuments` genuinely pages, by delegating to the real
+ * `listDocuments` (utils/portal.ts) over a small page size. */
+class PagingFakeRunPortalPort implements RunPortalPort {
+  readonly exportCalls: number[] = [];
+  private readonly portalPort: FakePagingPortalPort;
+
+  constructor(
+    pages: RawSearchResponse[],
+    private readonly exports: ReadonlyMap<number, Uint8Array>,
+    private readonly pageSize = 2,
+  ) {
+    this.portalPort = new FakePagingPortalPort(pages);
+  }
+
+  async listDocuments() {
+    return listDocuments(this.portalPort, {}, this.pageSize);
+  }
+
+  async exportDocument(id: number): Promise<ArrayBuffer> {
+    this.exportCalls.push(id);
+    const bytes = this.exports.get(id);
+    if (bytes === undefined) {
+      throw new Error(`PagingFakeRunPortalPort has no Export fixture for id ${id}`);
+    }
+    return toArrayBuffer(bytes);
+  }
+}
+
 const settings: Settings = { accountantEmail: '', subjectTemplate: 'eRačuni', archiveRoot: 'Arhiva' };
 
-describe('runOne', () => {
-  it('files the first unfiled Document under {root}/{Recipient}/{YYYY}/{MM}/{Issuer}/, with every Prilog', async () => {
+function ports(overrides: Partial<RunPorts> = {}): RunPorts {
+  return {
+    portal: new FakeRunPortalPort([], new Map()),
+    archive: new FakeArchivePort(),
+    store: new FakeRunStore(settings),
+    clock: new FakeClock(1772233200000),
+    delay: new FakeDelay(),
+    ...overrides,
+  };
+}
+
+describe('run', () => {
+  it('files every unfiled Document under {root}/{Recipient}/{YYYY}/{MM}/{Issuer}/, with every Prilog', async () => {
     const rows = [row({ id: 5, brojPriloga: 1 })];
     const exports = new Map([[5, buildExportZip(5, ['Prilog-A.pdf'])]]);
     const archive = new FakeArchivePort();
     const store = new FakeRunStore(settings);
     const portal = new FakeRunPortalPort(rows, exports);
 
-    const result = await runOne({ portal, archive, store, clock: new FakeClock(1772233200000) });
+    const report = await run(ports({ portal, archive, store }));
 
-    expect(result).toEqual({
-      filed: true,
-      documentId: 5,
-      // Trailing dots are stripped by sanitizeSegment (trap 3) — "d.o.o." becomes "d.o.o".
-      directory: ['Arhiva', 'Primatelj d.o.o', '2026', '02', 'Izdavatelj d.o.o'],
-      filenames: ['2026-02-28_5-1-1.xml', '2026-02-28_5-1-1.pdf', '2026-02-28_5-1-1_Prilog-A.pdf'],
+    expect(report).toEqual({
+      filed: [
+        {
+          documentId: 5,
+          // Trailing dots are stripped by sanitizeSegment (trap 3) — "d.o.o." becomes "d.o.o".
+          directory: ['Arhiva', 'Primatelj d.o.o', '2026', '02', 'Izdavatelj d.o.o'],
+          filenames: ['2026-02-28_5-1-1.xml', '2026-02-28_5-1-1.pdf', '2026-02-28_5-1-1_Prilog-A.pdf'],
+        },
+      ],
+      skipped: [],
+      failed: [],
     });
     expect([...archive.files.keys()].sort()).toEqual([
       'Arhiva/Primatelj d.o.o/2026/02/Izdavatelj d.o.o/2026-02-28_5-1-1.pdf',
@@ -156,7 +264,7 @@ describe('runOne', () => {
     const archive = new FakeArchivePort();
     const portal = new FakeRunPortalPort(rows, new Map([[7, zip]]));
 
-    await runOne({ portal, archive, store: new FakeRunStore(settings), clock: new FakeClock(1) });
+    await run(ports({ portal, archive }));
 
     const written = archive.files.get('Arhiva/Primatelj d.o.o/2026/02/Izdavatelj d.o.o/2026-02-28_7-1-1.xml');
     expect(written).toEqual(originalBytes);
@@ -166,35 +274,68 @@ describe('runOne', () => {
     const rows = [row({ id: 11 })];
     const portal = new FakeRunPortalPort(rows, new Map([[11, buildExportZip(11)]]));
 
-    await runOne({ portal, archive: new FakeArchivePort(), store: new FakeRunStore(settings), clock: new FakeClock(1) });
+    await run(ports({ portal }));
 
     expect(portal.exportCalls).toEqual([11]);
   });
 
-  it('skips a Document already marked Filed and picks the next one', async () => {
+  it('skips a Document already marked Filed and still files the rest', async () => {
     const rows = [row({ id: 1 }), row({ id: 2 })];
     const store = new FakeRunStore(settings);
     await store.markFiled(1, 1000);
     const portal = new FakeRunPortalPort(rows, new Map([[2, buildExportZip(2)]]));
 
-    const result = await runOne({ portal, archive: new FakeArchivePort(), store, clock: new FakeClock(1) });
+    const report = await run(ports({ portal, store }));
 
-    expect(result).toMatchObject({ filed: true, documentId: 2 });
+    expect(report.skipped).toEqual([1]);
+    expect(report.filed).toMatchObject([{ documentId: 2 }]);
     expect(portal.exportCalls).toEqual([2]);
   });
 
-  it('returns filed:false and fetches no Export when every Document is already Filed', async () => {
+  it('never stops early on the assumption that already-Filed rows come first (HANDOFF: result order is not a contract)', async () => {
+    // The Filed Document (100) is listed before the unfiled one (1) — an incremental Run that
+    // stopped at the first Filed row would miss id 1 entirely.
+    const rows = [row({ id: 100 }), row({ id: 1 })];
+    const store = new FakeRunStore(settings);
+    await store.markFiled(100, 1000);
+    const portal = new FakeRunPortalPort(rows, new Map([[1, buildExportZip(1)]]));
+
+    const report = await run(ports({ portal, store }));
+
+    expect(report.skipped).toEqual([100]);
+    expect(report.filed).toMatchObject([{ documentId: 1 }]);
+  });
+
+  it('writes nothing and fetches no Export when every Document is already Filed', async () => {
     const rows = [row({ id: 1 })];
     const store = new FakeRunStore(settings);
     await store.markFiled(1, 1000);
     const archive = new FakeArchivePort();
     const portal = new FakeRunPortalPort(rows, new Map());
 
-    const result = await runOne({ portal, archive, store, clock: new FakeClock(1) });
+    const report = await run(ports({ portal, archive, store }));
 
-    expect(result).toEqual({ filed: false });
+    expect(report).toEqual({ filed: [], skipped: [1], failed: [] });
     expect(archive.files.size).toBe(0);
     expect(portal.exportCalls).toEqual([]);
+  });
+
+  it('a second Run over unchanged data writes nothing (a Document already Filed is skipped)', async () => {
+    const rows = [row({ id: 1 }), row({ id: 2 })];
+    const store = new FakeRunStore(settings);
+    const exports = new Map([
+      [1, buildExportZip(1)],
+      [2, buildExportZip(2)],
+    ]);
+    const archive = new FakeArchivePort();
+
+    await run(ports({ portal: new FakeRunPortalPort(rows, exports), archive, store }));
+    const writesAfterFirstRun = archive.writeLog.length;
+
+    const secondReport = await run(ports({ portal: new FakeRunPortalPort(rows, exports), archive, store }));
+
+    expect(secondReport).toEqual({ filed: [], skipped: [1, 2], failed: [] });
+    expect(archive.writeLog).toHaveLength(writesAfterFirstRun);
   });
 
   it('re-running over the same Document overwrites at identical paths rather than a (1) copy (ADR-0004)', async () => {
@@ -202,22 +343,55 @@ describe('runOne', () => {
     const exports = new Map([[9, buildExportZip(9)]]);
     const archive = new FakeArchivePort();
     const clock = new FakeClock(1);
-    // A store that never records Filed, so runOne re-selects the same Document each time.
+    // A store that never records Filed, so run re-selects the same Document each time.
     const neverFiledStore: RunStore = {
       getSettings: async () => settings,
       isFiled: async () => false,
       markFiled: async () => {},
+      cacheEracun: async () => {},
+      pruneEracunCache: async () => {},
     };
-    const runPorts: RunPorts = { portal: new FakeRunPortalPort(rows, exports), archive, store: neverFiledStore, clock };
 
-    await runOne(runPorts);
+    await run(ports({ portal: new FakeRunPortalPort(rows, exports), archive, store: neverFiledStore, clock }));
     const pathsAfterFirstRun = [...archive.files.keys()].sort();
 
-    await runOne({ ...runPorts, portal: new FakeRunPortalPort(rows, exports) });
+    await run(ports({ portal: new FakeRunPortalPort(rows, exports), archive, store: neverFiledStore, clock }));
     const pathsAfterSecondRun = [...archive.files.keys()].sort();
 
     expect(pathsAfterSecondRun).toEqual(pathsAfterFirstRun);
     expect(archive.writeLog).toHaveLength(4); // 2 files, written once per run
+  });
+
+  it('interrupting a Run (one Document fails) and re-running resumes without duplicating or skipping', async () => {
+    const rows = [row({ id: 1 }), row({ id: 2 })];
+    const exports = new Map([
+      [1, buildExportZip(1)],
+      [2, buildExportZip(2)],
+    ]);
+    const store = new FakeRunStore(settings);
+    const archive = new FakeArchivePort();
+    archive.failForDocumentIds.add(2); // simulates the interruption: document 2 never finishes
+
+    const firstReport = await run(ports({ portal: new FakeRunPortalPort(rows, exports), archive, store }));
+    expect(firstReport.filed).toMatchObject([{ documentId: 1 }]);
+    expect(firstReport.failed).toMatchObject([{ documentId: 2 }]);
+    expect(await store.isFiled(1)).toBe(true);
+    expect(await store.isFiled(2)).toBe(false);
+
+    archive.failForDocumentIds.clear(); // the interruption is over — document 2 can now succeed
+    const secondPortal = new FakeRunPortalPort(rows, exports);
+    const secondReport = await run(ports({ portal: secondPortal, archive, store }));
+
+    expect(secondReport.skipped).toEqual([1]);
+    expect(secondReport.failed).toEqual([]);
+    expect(secondReport.filed).toMatchObject([{ documentId: 2 }]);
+    expect(secondPortal.exportCalls).toEqual([2]); // document 1 is not re-fetched
+    expect([...archive.files.keys()].sort()).toEqual([
+      'Arhiva/Primatelj d.o.o/2026/02/Izdavatelj d.o.o/2026-02-28_1-1-1.pdf',
+      'Arhiva/Primatelj d.o.o/2026/02/Izdavatelj d.o.o/2026-02-28_1-1-1.xml',
+      'Arhiva/Primatelj d.o.o/2026/02/Izdavatelj d.o.o/2026-02-28_2-1-1.pdf',
+      'Arhiva/Primatelj d.o.o/2026/02/Izdavatelj d.o.o/2026-02-28_2-1-1.xml',
+    ]);
   });
 
   it('marks a Document Filed only once every one of its files is written', async () => {
@@ -228,10 +402,9 @@ describe('runOne', () => {
     const store = new FakeRunStore(settings);
     const portal = new FakeRunPortalPort(rows, exports);
 
-    await expect(runOne({ portal, archive, store, clock: new FakeClock(1) })).rejects.toThrow(
-      'simulated failure writing',
-    );
+    const report = await run(ports({ portal, archive, store }));
 
+    expect(report.failed).toMatchObject([{ documentId: 3 }]);
     expect(await store.isFiled(3)).toBe(false);
   });
 
@@ -244,12 +417,9 @@ describe('runOne', () => {
     await store.markFiled(1, 1);
     const portal = new FakeRunPortalPort(rows, new Map([[2, buildExportZip(2)]]));
 
-    const result = await runOne({ portal, archive: new FakeArchivePort(), store, clock: new FakeClock(1) });
+    const report = await run(ports({ portal, store }));
 
-    expect(result).toMatchObject({
-      filed: true,
-      directory: ['Arhiva', 'Primatelj d.o.o', '2026', '02', 'Prvo Ime d.o.o'],
-    });
+    expect(report.filed).toMatchObject([{ directory: ['Arhiva', 'Primatelj d.o.o', '2026', '02', 'Prvo Ime d.o.o'] }]);
   });
 
   it.each([
@@ -257,14 +427,25 @@ describe('runOne', () => {
     ['brojPriloga', { brojPriloga: undefined }],
     ['kupac', { kupac: undefined }],
     ['kupac.naziv', { kupac: { oib: '22222222222' } }],
-  ])('fails loudly when the selected Document is missing %s, rather than filling in a default', async (_name, overrides) => {
-    const rows = [row({ id: 1, ...overrides })];
-    const portal = new FakeRunPortalPort(rows, new Map());
+  ])(
+    'records a failure — rather than filling in a default — when the selected Document is missing %s, without aborting the Run',
+    async (_name, overrides) => {
+      const rows = [
+        row({ id: 1, ...overrides }),
+        // A distinct kupac OIB, so document 1's malformed kupac (in the `kupac.naziv` case,
+        // one that carries the *same* OIB as the default but no naziv) can never contaminate
+        // document 2's own name resolution — candidatesFor scans the whole row list per OIB.
+        row({ id: 2, kupac: { oib: '99999999999', naziv: 'Drugi Primatelj d.o.o.' } }),
+      ];
+      const portal = new FakeRunPortalPort(rows, new Map([[2, buildExportZip(2)]]));
 
-    await expect(
-      runOne({ portal, archive: new FakeArchivePort(), store: new FakeRunStore(settings), clock: new FakeClock(1) }),
-    ).rejects.toThrow(RunError);
-  });
+      const report = await run(ports({ portal }));
+
+      expect(report.failed).toHaveLength(1);
+      expect(report.failed[0].documentId).toBe(1);
+      expect(report.filed).toMatchObject([{ documentId: 2 }]);
+    },
+  );
 
   it('files the target Document even when an unrelated, already-Filed historical row is malformed', async () => {
     // A row missing `kupac` entirely — malformed, but irrelevant to today's target and already
@@ -275,8 +456,155 @@ describe('runOne', () => {
     await store.markFiled(1, 1);
     const portal = new FakeRunPortalPort(rows, new Map([[2, buildExportZip(2)]]));
 
-    const result = await runOne({ portal, archive: new FakeArchivePort(), store, clock: new FakeClock(1) });
+    const report = await run(ports({ portal, store }));
 
-    expect(result).toMatchObject({ filed: true, documentId: 2 });
+    expect(report.filed).toMatchObject([{ documentId: 2 }]);
+    expect(report.failed).toEqual([]);
+  });
+
+  describe('throttling', () => {
+    it('fetches Exports sequentially, never more than one in flight at once', async () => {
+      const rows = [row({ id: 1 }), row({ id: 2 }), row({ id: 3 })];
+      const exports = new Map([
+        [1, buildExportZip(1)],
+        [2, buildExportZip(2)],
+        [3, buildExportZip(3)],
+      ]);
+      const portal = new FakeRunPortalPort(rows, exports);
+
+      await run(ports({ portal }));
+
+      expect(portal.exportCalls).toEqual([1, 2, 3]);
+      expect(portal.maxConcurrent).toBe(1);
+    });
+
+    it('waits between Exports, but not before the first one', async () => {
+      const rows = [row({ id: 1 }), row({ id: 2 }), row({ id: 3 })];
+      const exports = new Map([
+        [1, buildExportZip(1)],
+        [2, buildExportZip(2)],
+        [3, buildExportZip(3)],
+      ]);
+      const delay = new FakeDelay();
+
+      await run(ports({ portal: new FakeRunPortalPort(rows, exports), delay }));
+
+      expect(delay.waits).toEqual([EXPORT_DELAY_MS, EXPORT_DELAY_MS]); // one fewer than the Export count
+    });
+
+    it('does not wait for a Document skipped as already Filed, and does not wait before an Export that never happens (a validation failure)', async () => {
+      const rows = [row({ id: 1 }), row({ id: 2, kupac: undefined }), row({ id: 3 })];
+      const store = new FakeRunStore(settings);
+      await store.markFiled(1, 1);
+      const exports = new Map([[3, buildExportZip(3)]]);
+      const delay = new FakeDelay();
+
+      const report = await run(ports({ portal: new FakeRunPortalPort(rows, exports), store, delay }));
+
+      expect(report.skipped).toEqual([1]);
+      expect(report.failed).toMatchObject([{ documentId: 2 }]);
+      expect(report.filed).toMatchObject([{ documentId: 3 }]);
+      // Only one real Export (id 3) ever happened, so there is no pair of Exports to space out.
+      expect(delay.waits).toEqual([]);
+    });
+  });
+
+  describe('the eRačun XML cache', () => {
+    it('caches a Document\'s eRačun bytes at download time, keyed by id, at the clock\'s instant', async () => {
+      const rows = [row({ id: 4 })];
+      const originalBytes = utf8(eracunXml('document 4'));
+      const zip = zipSync(
+        { [`4/${XML_HEX}.xml`]: originalBytes, [`4/${PDF_HEX}.pdf`]: utf8('%PDF-1.4') },
+        { level: 0 },
+      );
+      const store = new FakeRunStore(settings);
+      const clock = new FakeClock(1772233200000);
+
+      await run(ports({ portal: new FakeRunPortalPort(rows, new Map([[4, zip]])), store, clock }));
+
+      expect(store.cached.get(4)).toEqual({ bytes: originalBytes, cachedAt: 1772233200000 });
+    });
+
+    it('still caches the eRačun bytes even when the Archive write later fails', async () => {
+      const rows = [row({ id: 5 })];
+      const zip = buildExportZip(5);
+      const store = new FakeRunStore(settings);
+      const archive = new FakeArchivePort();
+      archive.failAfterWrites = 0; // every write fails, including the very first
+
+      const report = await run(ports({ portal: new FakeRunPortalPort(rows, new Map([[5, zip]])), archive, store }));
+
+      expect(report.failed).toMatchObject([{ documentId: 5 }]);
+      expect(store.cached.has(5)).toBe(true);
+    });
+
+    it('prunes the cache once per Run, at the clock\'s instant', async () => {
+      const store = new FakeRunStore(settings);
+      const clock = new FakeClock(1772233200000);
+
+      await run(ports({ clock, store }));
+
+      expect(store.pruneCalls).toEqual([1772233200000]);
+    });
+  });
+
+  describe('paging', () => {
+    it('walks the full filtered window across more than one page', async () => {
+      const rows = Array.from({ length: 5 }, (_, i) => row({ id: i + 1 }));
+      const pages: RawSearchResponse[] = [
+        { recordsTotal: 5, data: [rows[0], rows[1]] },
+        { recordsTotal: 5, data: [rows[2], rows[3]] },
+        { recordsTotal: 5, data: [rows[4]] },
+      ];
+      const store = new FakeRunStore(settings);
+      await store.markFiled(1, 1); // one already Filed, on the first page
+      const exports = new Map(
+        [2, 3, 4, 5].map((id) => [id, buildExportZip(id)] as const),
+      );
+      const portal = new PagingFakeRunPortalPort(pages, exports, 2);
+
+      const report = await run(ports({ portal, store }));
+
+      expect(report.skipped).toEqual([1]);
+      expect(report.filed.map((f) => f.documentId)).toEqual([2, 3, 4, 5]);
+      expect(portal.exportCalls).toEqual([2, 3, 4, 5]);
+    });
+  });
+
+  it('files every unfiled Document in a mixed batch: one already Filed, one failing, one with two Prilozi, one with none, across more than one page', async () => {
+    const rows = [
+      row({ id: 1 }), // already Filed — skipped
+      row({ id: 2, kupac: undefined }), // fails validation
+      row({ id: 3, brojPriloga: 0 }), // succeeds, no Prilozi
+      row({ id: 4, brojPriloga: 2 }), // succeeds, two Prilozi
+      row({ id: 5, brojPriloga: 0 }), // succeeds, no Prilozi
+    ];
+    const pages: RawSearchResponse[] = [
+      { recordsTotal: 5, data: [rows[0], rows[1]] },
+      { recordsTotal: 5, data: [rows[2], rows[3]] },
+      { recordsTotal: 5, data: [rows[4]] },
+    ];
+    const exports = new Map([
+      [3, buildExportZip(3)],
+      [4, buildExportZip(4, ['Prilog-A.pdf', 'Prilog-B.pdf'])],
+      [5, buildExportZip(5)],
+    ]);
+    const store = new FakeRunStore(settings);
+    await store.markFiled(1, 1);
+    const portal = new PagingFakeRunPortalPort(pages, exports, 2);
+    const delay = new FakeDelay();
+
+    const report = await run(ports({ portal, store, delay }));
+
+    expect(report.skipped).toEqual([1]);
+    expect(report.failed).toMatchObject([{ documentId: 2 }]);
+    expect(report.filed.map((f) => f.documentId)).toEqual([3, 4, 5]);
+    const withPrilozi = report.filed.find((f) => f.documentId === 4)!;
+    expect(withPrilozi.filenames).toHaveLength(4); // xml + pdf + 2 Prilozi
+    const withoutPrilozi = report.filed.find((f) => f.documentId === 5)!;
+    expect(withoutPrilozi.filenames).toHaveLength(2); // xml + pdf only
+    // Three real Exports (3, 4, 5) → two waits between them. Document 2 never reached the
+    // Portal, so it contributes no wait of its own.
+    expect(delay.waits).toEqual([EXPORT_DELAY_MS, EXPORT_DELAY_MS]);
   });
 });
