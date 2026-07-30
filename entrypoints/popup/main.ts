@@ -1,8 +1,11 @@
 import { DownloadsArchivePort } from '@/utils/archive';
 import type { BackfillPlan, BackfillPort } from '@/utils/backfill';
 import { planBackfill } from '@/utils/backfill';
+import { composeBundle, planBundle, type BundleMonth, type BundlePlan, type BundlePortalPort } from '@/utils/bundle';
+import { bundleFilename } from '@/utils/bundle';
 import { systemClock } from '@/utils/clock';
 import { systemDelay } from '@/utils/delay';
+import { DownloadsEmlWriterPort } from '@/utils/eml-writer';
 import type {
   ExportDocumentMessage,
   ExportDocumentResponse,
@@ -10,9 +13,9 @@ import type {
   ListDocumentsResponse,
 } from '@/utils/messages';
 import { summarizeRow } from '@/utils/portal';
-import { formatBackfillOffer, formatProgress, summarizeRun } from '@/utils/report';
+import { formatBackfillOffer, formatBundleOffer, formatProgress, summarizeRun } from '@/utils/report';
 import { run, type RunPortalPort, type RunReport } from '@/utils/run';
-import { cacheEracun, getSettings, hasFiledAny, isFiled, markFiled, pruneEracunCache } from '@/utils/store';
+import { cacheEracun, getCachedEracun, getSettings, hasFiledAny, isFiled, markFiled, pruneEracunCache } from '@/utils/store';
 
 document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
   <h1>EMR</h1>
@@ -27,6 +30,18 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
   <p id="status"></p>
   <div id="report"></div>
   <ul id="rows"></ul>
+  <hr />
+  <label>
+    Mjesec za slanje
+    <input type="month" id="bundle-month" />
+  </label>
+  <button id="posalji">Pošalji</button>
+  <div id="bundle-offer" hidden>
+    <p id="bundle-offer-text"></p>
+    <button id="bundle-compose">Sastavi</button>
+    <button id="bundle-cancel">Odustani</button>
+  </div>
+  <p id="bundle-status"></p>
 `;
 
 const button = document.querySelector<HTMLButtonElement>('#list')!;
@@ -39,6 +54,14 @@ const backfillDeclineButton = document.querySelector<HTMLButtonElement>('#backfi
 const status = document.querySelector<HTMLParagraphElement>('#status')!;
 const reportEl = document.querySelector<HTMLDivElement>('#report')!;
 const rowsList = document.querySelector<HTMLUListElement>('#rows')!;
+
+const bundleMonthInput = document.querySelector<HTMLInputElement>('#bundle-month')!;
+const posaljiButton = document.querySelector<HTMLButtonElement>('#posalji')!;
+const bundleOffer = document.querySelector<HTMLDivElement>('#bundle-offer')!;
+const bundleOfferText = document.querySelector<HTMLParagraphElement>('#bundle-offer-text')!;
+const bundleComposeButton = document.querySelector<HTMLButtonElement>('#bundle-compose')!;
+const bundleCancelButton = document.querySelector<HTMLButtonElement>('#bundle-cancel')!;
+const bundleStatus = document.querySelector<HTMLParagraphElement>('#bundle-status')!;
 
 /** Sends `message` to the active tab's content script and unwraps its `{ok, ...} | {ok:false,
  * error}` envelope (ADR-0005 — only that content script can reach the Portal's origin and its
@@ -231,4 +254,78 @@ backfillDeclineButton.addEventListener('click', () => {
 retryButton.addEventListener('click', () => {
   if (!lastReport || lastReport.failed.length === 0) return;
   void preuzmi(lastReport.failed.map((failure) => failure.documentId));
+});
+
+/** `relayBackfillPort`'s shape — `listDocuments(filterParams)` — is exactly what `planBundle`
+ * needs too (utils/bundle.ts's `BundlePortalPort`), so the same relay serves both. */
+const relayBundlePort: BundlePortalPort = relayBackfillPort;
+
+function parseBundleMonth(value: string): BundleMonth | undefined {
+  const match = /^(\d{4})-(\d{2})$/.exec(value);
+  if (!match) return undefined;
+  return { year: Number(match[1]), month: Number(match[2]) };
+}
+
+let pendingBundlePlan: BundlePlan | null = null;
+
+function hideBundleOffer(): void {
+  bundleOffer.hidden = true;
+  pendingBundlePlan = null;
+}
+
+/** Pošalji (CONTEXT.md "Bundle"; ADR-0003): plans a month's Bundle and shows its total size
+ * before anything is composed (issue #12's acceptance), mirroring the backfill offer's
+ * plan-then-confirm shape above. */
+posaljiButton.addEventListener('click', async () => {
+  const month = parseBundleMonth(bundleMonthInput.value);
+  if (!month) {
+    bundleStatus.textContent = 'Odaberite mjesec.';
+    return;
+  }
+
+  // Checked here, not just left for composeBundle to embed an empty To: — settings.accountantEmail
+  // is what the acceptance criterion means by "the recipient address ... come[s] from settings",
+  // and a blank one is a setup gap the user can fix in Postavke, not something to compose past.
+  const settings = await getSettings();
+  if (!settings.accountantEmail) {
+    bundleStatus.textContent = 'Postavite e-mail adresu knjigovođe u Postavkama prije slanja.';
+    return;
+  }
+
+  posaljiButton.disabled = true;
+  bundleStatus.textContent = 'Provjera opsega…';
+  try {
+    const plan = await planBundle(relayBundlePort, { getCachedEracun }, month);
+    pendingBundlePlan = plan;
+    bundleOfferText.textContent = formatBundleOffer(plan);
+    bundleOffer.hidden = false;
+    bundleStatus.textContent = '';
+  } catch (error) {
+    bundleStatus.textContent = `Greška: ${(error as Error).message}`;
+  } finally {
+    posaljiButton.disabled = false;
+  }
+});
+
+bundleComposeButton.addEventListener('click', async () => {
+  const plan = pendingBundlePlan;
+  if (!plan) return;
+
+  bundleComposeButton.disabled = true;
+  bundleStatus.textContent = 'Sastavljanje…';
+  try {
+    const settings = await getSettings();
+    const eml = composeBundle(plan, settings);
+    await new DownloadsEmlWriterPort().writeAndOpen(bundleFilename(settings.subjectTemplate, plan.month), eml);
+    bundleStatus.textContent = 'Poruka je sastavljena i otvorena.';
+    hideBundleOffer();
+  } catch (error) {
+    bundleStatus.textContent = `Greška: ${(error as Error).message}`;
+  } finally {
+    bundleComposeButton.disabled = false;
+  }
+});
+
+bundleCancelButton.addEventListener('click', () => {
+  hideBundleOffer();
 });

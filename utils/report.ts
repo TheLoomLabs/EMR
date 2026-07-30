@@ -9,6 +9,7 @@
 // "Greška: …" convention already in the popup.
 
 import type { BackfillPlan } from './backfill';
+import { formatBundleMonth, type BundlePlan } from './bundle';
 import type { DriftedCode, FailedDocument, RunProgress, RunReport } from './run';
 
 function formatTotals(filed: number, skipped: number, failed: number): string {
@@ -40,6 +41,26 @@ export function formatProgress(progress: RunProgress): string {
   const totals = formatTotals(progress.filed, progress.skipped, progress.failed);
   if (progress.currentDocumentId === null) return totals;
   return `Dohvaćanje dokumenta ${progress.currentDocumentId}… ${totals}`;
+}
+
+function formatSize(bytes: number): string {
+  const KB = 1024;
+  const MB = KB * 1024;
+  if (bytes < KB) return `${bytes} B`;
+  const value = bytes < MB ? bytes / KB : bytes / MB;
+  const unit = bytes < MB ? 'KB' : 'MB';
+  return `${value.toFixed(1).replace('.', ',')} ${unit}`;
+}
+
+/** The Bundle offer shown before anything is composed (issue #12's acceptance: "sees the
+ * resulting Bundle's total size before it is composed") — a 44-Document month runs to roughly
+ * 7 MB (HANDOFF), so this is the point where an oversized attachment set is discovered, rather
+ * than by the user's mail client. No size line for zero Documents, mirroring
+ * `formatBackfillOffer`'s "nothing to wait for" rule below. */
+export function formatBundleOffer(plan: BundlePlan): string {
+  const count = `Dokumenata za ${formatBundleMonth(plan.month)}: ${plan.documents.length}.`;
+  if (plan.documents.length === 0) return count;
+  return `${count} Ukupna veličina: ${formatSize(plan.totalSizeBytes)}.`;
 }
 
 export interface RunSummary {

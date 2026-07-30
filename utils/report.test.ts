@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { BackfillPlan } from './backfill';
-import { formatBackfillOffer, formatProgress, summarizeRun } from './report';
+import type { BundlePlan } from './bundle';
+import { formatBackfillOffer, formatBundleOffer, formatProgress, summarizeRun } from './report';
 import type { RunProgress, RunReport } from './run';
 
 function emptyReport(overrides: Partial<RunReport> = {}): RunReport {
@@ -50,6 +51,34 @@ describe('formatBackfillOffer', () => {
 
   it('reports zero Documents plainly, without an estimate line', () => {
     expect(formatBackfillOffer(plan({ recordsTotal: 0, estimatedMillis: 0 }))).toBe('Pronađeno dokumenata: 0.');
+  });
+});
+
+describe('formatBundleOffer', () => {
+  function plan(overrides: Partial<BundlePlan> = {}): BundlePlan {
+    return { month: { year: 2026, month: 7 }, documents: [], totalSizeBytes: 0, ...overrides };
+  }
+
+  it('reports zero Documents plainly, without a size line', () => {
+    expect(formatBundleOffer(plan())).toBe('Dokumenata za 07/2026: 0.');
+  });
+
+  it('shows the count and total size in MB for a month-sized Bundle', () => {
+    const documents = Array.from({ length: 44 }, (_, i) => ({ documentId: i, filename: `${i}.xml`, bytes: new Uint8Array(0) }));
+    expect(formatBundleOffer(plan({ documents, totalSizeBytes: 7 * 1024 * 1024 }))).toBe(
+      'Dokumenata za 07/2026: 44. Ukupna veličina: 7,0 MB.',
+    );
+  });
+
+  it('shows the total size in KB for a small Bundle', () => {
+    const documents = [{ documentId: 1, filename: '1.xml', bytes: new Uint8Array(0) }];
+    expect(formatBundleOffer(plan({ documents, totalSizeBytes: 2048 }))).toBe(
+      'Dokumenata za 07/2026: 1. Ukupna veličina: 2,0 KB.',
+    );
+  });
+
+  it('pads a single-digit month to two digits', () => {
+    expect(formatBundleOffer(plan({ month: { year: 2026, month: 3 } }))).toBe('Dokumenata za 03/2026: 0.');
   });
 });
 
