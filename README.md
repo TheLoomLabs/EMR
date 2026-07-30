@@ -3,6 +3,8 @@
 Files incoming eRačuni from the MIKROeRAČUN Portal and forwards them to the Accountant. See
 `CONTEXT.md` for vocabulary and `HANDOFF.md` for project background.
 
+Run `make help` for the full list of targets — they wrap the npm scripts below.
+
 ## Develop
 
 ```
