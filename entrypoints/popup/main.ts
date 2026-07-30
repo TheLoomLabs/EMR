@@ -220,21 +220,22 @@ function hideBackfillOffer(): void {
  * "declined" state is needed (ADR-0004's promise: losing state costs bandwidth, never
  * correctness, extended to this decision too). */
 preuzmiButton.addEventListener('click', async () => {
-  if (!(await hasFiledAny())) {
-    preuzmiButton.disabled = true;
-    status.textContent = 'Provjera opsega…';
-    try {
+  preuzmiButton.disabled = true;
+  try {
+    if (!(await hasFiledAny())) {
+      status.textContent = 'Provjera opsega…';
       const plan = await planBackfill(relayBackfillPort, systemClock);
       pendingBackfillPlan = plan;
       backfillOfferText.textContent = formatBackfillOffer(plan);
       backfillOffer.hidden = false;
       status.textContent = '';
-    } catch (error) {
-      status.textContent = `Greška: ${(error as Error).message}`;
-    } finally {
-      preuzmiButton.disabled = false;
+      return;
     }
+  } catch (error) {
+    status.textContent = `Greška: ${(error as Error).message}`;
     return;
+  } finally {
+    preuzmiButton.disabled = false;
   }
 
   void preuzmi();
@@ -283,18 +284,18 @@ posaljiButton.addEventListener('click', async () => {
     return;
   }
 
-  // Checked here, not just left for composeBundle to embed an empty To: — settings.accountantEmail
-  // is what the acceptance criterion means by "the recipient address ... come[s] from settings",
-  // and a blank one is a setup gap the user can fix in Postavke, not something to compose past.
-  const settings = await getSettings();
-  if (!settings.accountantEmail) {
-    bundleStatus.textContent = 'Postavite e-mail adresu knjigovođe u Postavkama prije slanja.';
-    return;
-  }
-
   posaljiButton.disabled = true;
   bundleStatus.textContent = 'Provjera opsega…';
   try {
+    // Checked here, not just left for composeBundle to embed an empty To: — settings.accountantEmail
+    // is what the acceptance criterion means by "the recipient address ... come[s] from settings",
+    // and a blank one is a setup gap the user can fix in Postavke, not something to compose past.
+    const settings = await getSettings();
+    if (!settings.accountantEmail) {
+      bundleStatus.textContent = 'Postavite e-mail adresu knjigovođe u Postavkama prije slanja.';
+      return;
+    }
+
     const plan = await planBundle(relayBundlePort, { getCachedEracun }, month);
     pendingBundlePlan = plan;
     bundleOfferText.textContent = formatBundleOffer(plan);
