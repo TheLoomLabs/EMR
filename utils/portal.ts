@@ -148,11 +148,18 @@ export interface ZagrebWindow {
 /** Builds `filterParams` a day wider at each end than the window actually wants
  * (docs/portal-api.md, "kraj works — bounded windows are available"): whether the Portal's
  * bounds are inclusive is deliberately left unresolved, and querying wider is correct under
- * either reading. Narrow back to the exact window with `withinZagrebWindow`. */
-export function widenedFilterParams(window: ZagrebWindow): FilterParams {
+ * either reading. Narrow back to the exact window with `withinZagrebWindow`.
+ *
+ * `earliest`, when given, floors the widened start so it never precedes it — used by the
+ * first-run backfill (issue #11, utils/backfill.ts) so the widening never asks for a date before
+ * eRačun receipt began, even though `window.from` itself may already sit exactly on that
+ * boundary. */
+export function widenedFilterParams(window: ZagrebWindow, earliest?: ZagrebDate): FilterParams {
+  const widenedFrom = shiftZagrebDate(window.from, -1);
+  const from = earliest && compareZagrebDate(widenedFrom, earliest) < 0 ? earliest : widenedFrom;
   return {
     datumIzdavanja: {
-      pocetak: new Date(zagrebMidnightMillis(shiftZagrebDate(window.from, -1))).toISOString(),
+      pocetak: new Date(zagrebMidnightMillis(from)).toISOString(),
       kraj: new Date(zagrebMidnightMillis(shiftZagrebDate(window.to, 1))).toISOString(),
     },
     datumDospijeca: {},

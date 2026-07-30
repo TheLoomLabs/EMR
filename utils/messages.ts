@@ -2,10 +2,14 @@
 // script runs the actual list request (ADR-0005); the popup only asks for the result over
 // browser.runtime messaging, since it has no access to the Portal page itself.
 
-import type { DocumentRow } from './portal';
+import type { DocumentRow, FilterParams } from './portal';
 
 export interface ListDocumentsMessage {
   type: 'emr:list-documents';
+  /** Bounds the Portal's own search, per docs/portal-api.md's server-side filtering — omitted
+   * for a normal Run's unbounded walk of the full history (ADR-0008), given for the first-run
+   * backfill's bounded window (issue #11, utils/backfill.ts). */
+  filterParams?: FilterParams;
 }
 
 export type ListDocumentsResponse =

@@ -8,10 +8,28 @@
 // what lets the user act on it. Everything this module writes itself is Croatian, matching the
 // "Greška: …" convention already in the popup.
 
+import type { BackfillPlan } from './backfill';
 import type { DriftedCode, FailedDocument, RunProgress, RunReport } from './run';
 
 function formatTotals(filed: number, skipped: number, failed: number): string {
   return `Zapisano: ${filed}, preskočeno: ${skipped}, neuspjelo: ${failed}.`;
+}
+
+/** The first-run backfill offer (issue #11's acceptance: "a count and a time estimate are shown
+ * before any Export is fetched"). "Pronađeno dokumenata" rather than "Pronađeno je N dokumenata"
+ * sidesteps Croatian noun declension (1 dokument, 2–4 dokumenta, 5+ dokumenata) the same way
+ * `formatTotals` already does for "Zapisano"/"preskočeno"/"neuspjelo". No estimate line for zero
+ * Documents — there is nothing to wait for. */
+export function formatBackfillOffer(plan: BackfillPlan): string {
+  const count = `Pronađeno dokumenata: ${plan.recordsTotal}.`;
+  if (plan.recordsTotal === 0) return count;
+
+  const ONE_MINUTE_MS = 60_000;
+  const duration =
+    plan.estimatedMillis < ONE_MINUTE_MS
+      ? 'manje od minute'
+      : `približno ${Math.round(plan.estimatedMillis / ONE_MINUTE_MS)} min`;
+  return `${count} Procijenjeno trajanje: ${duration}.`;
 }
 
 /** The live progress line (acceptance: "which Document is being fetched now, and a running

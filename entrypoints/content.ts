@@ -21,7 +21,7 @@ export default defineContentScript({
     browser.runtime.onMessage.addListener(
       (message: unknown): Promise<ListDocumentsResponse | ExportDocumentResponse> | undefined => {
         if (isListDocumentsMessage(message)) {
-          return listDocuments(new HttpPortalPort())
+          return listDocuments(new HttpPortalPort(), message.filterParams)
             .then(({ recordsTotal, rows }): ListDocumentsResponse => ({ ok: true, recordsTotal, rows }))
             .catch((error): ListDocumentsResponse => ({ ok: false, error: (error as Error).message }));
         }

@@ -166,6 +166,25 @@ describe('widenedFilterParams', () => {
     expect(params.datumIzdavanja?.pocetak).toBe('2026-03-27T23:00:00.000Z'); // 28 Mar midnight, still CET
     expect(params.datumIzdavanja?.kraj).toBe('2026-03-29T22:00:00.000Z'); // 30 Mar midnight, now CEST
   });
+
+  it('does not widen past a given earliest bound (backfill must never ask before eRačun receipt began)', () => {
+    const params = widenedFilterParams(
+      { from: { year: 2026, month: 1, day: 1 }, to: { year: 2026, month: 1, day: 31 } },
+      { year: 2026, month: 1, day: 1 },
+    );
+
+    // Without the clamp this would be 31 Dec 2025 midnight — one day before window.from.
+    expect(params.datumIzdavanja?.pocetak).toBe('2025-12-31T23:00:00.000Z'); // 1 Jan 2026 Zagreb midnight
+  });
+
+  it('still widens normally when the window sits well clear of the earliest bound', () => {
+    const params = widenedFilterParams(
+      { from: { year: 2026, month: 3, day: 10 }, to: { year: 2026, month: 3, day: 20 } },
+      { year: 2026, month: 1, day: 1 },
+    );
+
+    expect(params.datumIzdavanja?.pocetak).toBe('2026-03-08T23:00:00.000Z'); // 9 Mar midnight, one day before
+  });
 });
 
 describe('withinZagrebWindow', () => {

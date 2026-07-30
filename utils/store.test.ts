@@ -6,6 +6,7 @@ import {
   DEFAULT_SETTINGS,
   getCachedEracun,
   getSettings,
+  hasFiledAny,
   isFiled,
   markFiled,
   pruneEracunCache,
@@ -53,6 +54,18 @@ describe('isFiled', () => {
 
     expect(await isFiled(1)).toBe(true);
     expect(await isFiled(2)).toBe(false);
+  });
+});
+
+describe('hasFiledAny', () => {
+  it('is false when nothing has ever been marked Filed (first use, issue #11)', async () => {
+    expect(await hasFiledAny()).toBe(false);
+  });
+
+  it('is true once anything has been marked Filed', async () => {
+    await markFiled(1, 1772233200000);
+
+    expect(await hasFiledAny()).toBe(true);
   });
 });
 

@@ -39,6 +39,15 @@ export async function isFiled(id: number): Promise<boolean> {
   return id in filed;
 }
 
+/** True once any Document has ever been marked Filed. The first-run backfill (issue #11) uses
+ * this — rather than a separate persisted flag — to decide whether to offer itself: a lost
+ * Filed set costs at most a re-offered backfill, never incorrect behaviour (ADR-0004's promise
+ * extended to this decision, not just to Archive paths). */
+export async function hasFiledAny(): Promise<boolean> {
+  const filed = await filedItem.getValue();
+  return Object.keys(filed).length > 0;
+}
+
 /** Records a Document as Filed only once every one of its files is on disk — callers must not
  * call this before every write for the Document has succeeded. */
 export async function markFiled(id: number, filedAt: number): Promise<void> {

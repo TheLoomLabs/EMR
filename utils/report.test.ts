@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { formatProgress, summarizeRun } from './report';
+import type { BackfillPlan } from './backfill';
+import { formatBackfillOffer, formatProgress, summarizeRun } from './report';
 import type { RunProgress, RunReport } from './run';
 
 function emptyReport(overrides: Partial<RunReport> = {}): RunReport {
@@ -23,6 +24,32 @@ describe('formatProgress', () => {
   it('shows only the running totals when no Document is currently being fetched', () => {
     const progress: RunProgress = { currentDocumentId: null, filed: 2, skipped: 1, failed: 3 };
     expect(formatProgress(progress)).toBe('Zapisano: 2, preskočeno: 1, neuspjelo: 3.');
+  });
+});
+
+describe('formatBackfillOffer', () => {
+  function plan(overrides: Partial<BackfillPlan> = {}): BackfillPlan {
+    return { documentIds: [], recordsTotal: 0, estimatedMillis: 0, ...overrides };
+  }
+
+  it('shows the count straight from recordsTotal, before any Export is fetched', () => {
+    expect(formatBackfillOffer(plan({ recordsTotal: 44 }))).toContain('Pronađeno dokumenata: 44.');
+  });
+
+  it('shows a whole-minute estimate, rounded, for a Run large enough to matter', () => {
+    expect(formatBackfillOffer(plan({ recordsTotal: 90, estimatedMillis: 90_000 }))).toContain(
+      'Procijenjeno trajanje: približno 2 min.',
+    );
+  });
+
+  it('says "less than a minute" rather than "0 min" for a short estimate', () => {
+    expect(formatBackfillOffer(plan({ recordsTotal: 3, estimatedMillis: 3_000 }))).toContain(
+      'Procijenjeno trajanje: manje od minute.',
+    );
+  });
+
+  it('reports zero Documents plainly, without an estimate line', () => {
+    expect(formatBackfillOffer(plan({ recordsTotal: 0, estimatedMillis: 0 }))).toBe('Pronađeno dokumenata: 0.');
   });
 });
 

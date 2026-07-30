@@ -1,4 +1,6 @@
 import { DownloadsArchivePort } from '@/utils/archive';
+import type { BackfillPlan, BackfillPort } from '@/utils/backfill';
+import { planBackfill } from '@/utils/backfill';
 import { systemClock } from '@/utils/clock';
 import { systemDelay } from '@/utils/delay';
 import type {
@@ -8,15 +10,20 @@ import type {
   ListDocumentsResponse,
 } from '@/utils/messages';
 import { summarizeRow } from '@/utils/portal';
-import { formatProgress, summarizeRun } from '@/utils/report';
+import { formatBackfillOffer, formatProgress, summarizeRun } from '@/utils/report';
 import { run, type RunPortalPort, type RunReport } from '@/utils/run';
-import { cacheEracun, getSettings, isFiled, markFiled, pruneEracunCache } from '@/utils/store';
+import { cacheEracun, getSettings, hasFiledAny, isFiled, markFiled, pruneEracunCache } from '@/utils/store';
 
 document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
   <h1>EMR</h1>
   <button id="list">Prikaži dokumente</button>
   <button id="preuzmi">Preuzmi</button>
   <button id="retry" hidden>Ponovi neuspjele</button>
+  <div id="backfill-offer" hidden>
+    <p id="backfill-offer-text"></p>
+    <button id="backfill-start">Započni</button>
+    <button id="backfill-decline">Ne sada</button>
+  </div>
   <p id="status"></p>
   <div id="report"></div>
   <ul id="rows"></ul>
@@ -25,6 +32,10 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
 const button = document.querySelector<HTMLButtonElement>('#list')!;
 const preuzmiButton = document.querySelector<HTMLButtonElement>('#preuzmi')!;
 const retryButton = document.querySelector<HTMLButtonElement>('#retry')!;
+const backfillOffer = document.querySelector<HTMLDivElement>('#backfill-offer')!;
+const backfillOfferText = document.querySelector<HTMLParagraphElement>('#backfill-offer-text')!;
+const backfillStartButton = document.querySelector<HTMLButtonElement>('#backfill-start')!;
+const backfillDeclineButton = document.querySelector<HTMLButtonElement>('#backfill-decline')!;
 const status = document.querySelector<HTMLParagraphElement>('#status')!;
 const reportEl = document.querySelector<HTMLDivElement>('#report')!;
 const rowsList = document.querySelector<HTMLUListElement>('#rows')!;
@@ -84,6 +95,16 @@ const relayPortalPort: RunPortalPort = {
     const message: ExportDocumentMessage = { type: 'emr:export-document', id };
     const response = await sendToPortal<ExportDocumentResponse>(message);
     return response.bytes;
+  },
+};
+
+/** The same relay, but carrying `filterParams` through — the first-run backfill's bounded window
+ * (issue #11, utils/backfill.ts), never used by a normal Run's unbounded walk (ADR-0008). */
+const relayBackfillPort: BackfillPort = {
+  async listDocuments(filterParams) {
+    const message: ListDocumentsMessage = { type: 'emr:list-documents', filterParams };
+    const response = await sendToPortal<ListDocumentsResponse>(message);
+    return { recordsTotal: response.recordsTotal, rows: response.rows };
   },
 };
 
@@ -162,7 +183,50 @@ async function preuzmi(documentIds?: readonly number[]): Promise<void> {
   }
 }
 
-preuzmiButton.addEventListener('click', () => preuzmi());
+let pendingBackfillPlan: BackfillPlan | null = null;
+
+function hideBackfillOffer(): void {
+  backfillOffer.hidden = true;
+  pendingBackfillPlan = null;
+}
+
+/** On first use (issue #11: no Document has ever been Filed), shows a count and a rough time
+ * estimate before any Export is fetched, and lets the user start or decline rather than
+ * launching straight into a Run that could be dozens of Documents deep. A declined offer leaves
+ * the Filed set empty, so the next Preuzmi click offers backfill again — no separate persisted
+ * "declined" state is needed (ADR-0004's promise: losing state costs bandwidth, never
+ * correctness, extended to this decision too). */
+preuzmiButton.addEventListener('click', async () => {
+  if (!(await hasFiledAny())) {
+    preuzmiButton.disabled = true;
+    status.textContent = 'Provjera opsega…';
+    try {
+      const plan = await planBackfill(relayBackfillPort, systemClock);
+      pendingBackfillPlan = plan;
+      backfillOfferText.textContent = formatBackfillOffer(plan);
+      backfillOffer.hidden = false;
+      status.textContent = '';
+    } catch (error) {
+      status.textContent = `Greška: ${(error as Error).message}`;
+    } finally {
+      preuzmiButton.disabled = false;
+    }
+    return;
+  }
+
+  void preuzmi();
+});
+
+backfillStartButton.addEventListener('click', () => {
+  const plan = pendingBackfillPlan;
+  if (!plan) return;
+  hideBackfillOffer();
+  void preuzmi(plan.documentIds);
+});
+
+backfillDeclineButton.addEventListener('click', () => {
+  hideBackfillOffer();
+});
 
 retryButton.addEventListener('click', () => {
   if (!lastReport || lastReport.failed.length === 0) return;
