@@ -1,4 +1,7 @@
 import { APPTOKEN_EVENT, observeAppToken } from '@/utils/apptoken';
+import { isListDocumentsMessage, type ListDocumentsResponse } from '@/utils/messages';
+import { listDocuments } from '@/utils/portal';
+import { HttpPortalPort } from '@/utils/portal-client';
 
 export default defineContentScript({
   // Was 'mikroracun.porezna-uprava.hr' — missing the 'e' the real Portal hostname has, so
@@ -8,6 +11,14 @@ export default defineContentScript({
   main(ctx) {
     ctx.addEventListener(window, APPTOKEN_EVENT, (event) => {
       observeAppToken((event as CustomEvent<string>).detail);
+    });
+
+    browser.runtime.onMessage.addListener((message: unknown): Promise<ListDocumentsResponse> | undefined => {
+      if (!isListDocumentsMessage(message)) return undefined;
+
+      return listDocuments(new HttpPortalPort())
+        .then(({ recordsTotal, rows }): ListDocumentsResponse => ({ ok: true, recordsTotal, rows }))
+        .catch((error): ListDocumentsResponse => ({ ok: false, error: (error as Error).message }));
     });
   },
 });

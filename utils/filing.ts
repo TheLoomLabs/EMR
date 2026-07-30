@@ -27,6 +27,34 @@ export function zagrebDate(epochMillis: number): ZagrebDate {
   return { year: get('year'), month: get('month'), day: get('day') };
 }
 
+/** The inverse of `zagrebDate`: the epoch-millis instant of local midnight for a Zagreb calendar
+ * date. Re-checks the UTC offset at the resolved instant in case a DST transition moved it right
+ * at midnight. */
+export function zagrebMidnightMillis(date: ZagrebDate): number {
+  const guess = Date.UTC(date.year, date.month - 1, date.day);
+  const offset = zagrebUtcOffsetMinutes(guess);
+  const confirmedOffset = zagrebUtcOffsetMinutes(guess - offset * 60_000);
+  return guess - confirmedOffset * 60_000;
+}
+
+function zagrebUtcOffsetMinutes(utcMillis: number): number {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: FILING_TIME_ZONE,
+    timeZoneName: 'shortOffset',
+  }).formatToParts(new Date(utcMillis));
+  const name = parts.find((part) => part.type === 'timeZoneName')?.value ?? 'GMT+0';
+  const match = /GMT([+-]\d+)/.exec(name);
+  return match ? Number(match[1]) * 60 : 0;
+}
+
+/** Adds (or subtracts) whole calendar days to a Zagreb date. Pure calendar arithmetic pivoted on
+ * UTC noon, so a timezone offset can never push the result onto the wrong day. */
+export function shiftZagrebDate(date: ZagrebDate, deltaDays: number): ZagrebDate {
+  const pivot = Date.UTC(date.year, date.month - 1, date.day, 12);
+  const shifted = new Date(pivot + deltaDays * 86_400_000);
+  return { year: shifted.getUTCFullYear(), month: shifted.getUTCMonth() + 1, day: shifted.getUTCDate() };
+}
+
 function pad2(n: number): string {
   return n.toString().padStart(2, '0');
 }

@@ -8,8 +8,10 @@ import {
   prilogFilename,
   resolvePartyName,
   sanitizeSegment,
+  shiftZagrebDate,
   visualisationFilename,
   zagrebDate,
+  zagrebMidnightMillis,
 } from './filing';
 
 describe('zagrebDate', () => {
@@ -43,6 +45,39 @@ describe('zagrebDate', () => {
     expect(zagrebDate(1792792800000)).toEqual({ year: 2026, month: 10, day: 24 }); // CEST, before
     expect(zagrebDate(1792879200000)).toEqual({ year: 2026, month: 10, day: 25 }); // day of transition
     expect(zagrebDate(1792969200000)).toEqual({ year: 2026, month: 10, day: 26 }); // CET, after
+  });
+});
+
+describe('zagrebMidnightMillis', () => {
+  it('is the exact inverse of zagrebDate for a known Zagreb midnight', () => {
+    expect(zagrebMidnightMillis({ year: 2026, month: 2, day: 28 })).toBe(1772233200000);
+    expect(zagrebMidnightMillis({ year: 2026, month: 3, day: 1 })).toBe(1772319600000);
+  });
+
+  it('round-trips through the spring DST transition', () => {
+    for (const millis of [1774652400000, 1774738800000, 1774821600000]) {
+      expect(zagrebMidnightMillis(zagrebDate(millis))).toBe(millis);
+    }
+  });
+
+  it('round-trips through the autumn DST transition', () => {
+    for (const millis of [1792792800000, 1792879200000, 1792969200000]) {
+      expect(zagrebMidnightMillis(zagrebDate(millis))).toBe(millis);
+    }
+  });
+});
+
+describe('shiftZagrebDate', () => {
+  it('advances into the next month', () => {
+    expect(shiftZagrebDate({ year: 2026, month: 7, day: 31 }, 1)).toEqual({ year: 2026, month: 8, day: 1 });
+  });
+
+  it('goes back into the previous month', () => {
+    expect(shiftZagrebDate({ year: 2026, month: 7, day: 1 }, -1)).toEqual({ year: 2026, month: 6, day: 30 });
+  });
+
+  it('crosses a year boundary', () => {
+    expect(shiftZagrebDate({ year: 2025, month: 12, day: 31 }, 1)).toEqual({ year: 2026, month: 1, day: 1 });
   });
 });
 
