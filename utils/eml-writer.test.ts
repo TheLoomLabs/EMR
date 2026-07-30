@@ -35,7 +35,7 @@ function stubDownloads(downloadId = 1) {
 }
 
 describe('DownloadsEmlWriterPort', () => {
-  it('writes the given bytes as a message/rfc822 data: URL at the given filename', async () => {
+  it('writes the given bytes as a message/rfc822 blob: URL at the given filename', async () => {
     const downloads = stubDownloads();
     const port = new DownloadsEmlWriterPort();
     const bytes = new TextEncoder().encode('MIME-Version: 1.0\r\n');
@@ -47,9 +47,21 @@ describe('DownloadsEmlWriterPort', () => {
     expect(downloads.download).toHaveBeenCalledTimes(1);
     const [options] = downloads.download.mock.calls[0];
     expect(options.filename).toBe('eRačuni 07-2026.eml');
-    expect(options.url).toBe(`data:message/rfc822;base64,${btoa('MIME-Version: 1.0\r\n')}`);
+    expect(options.url).toMatch(/^blob:/);
     expect(options.conflictAction).toBe('overwrite');
     expect(options.saveAs).toBe(false);
+  });
+
+  it('revokes the blob: URL once the download settles', async () => {
+    const downloads = stubDownloads();
+    const port = new DownloadsEmlWriterPort();
+    const revokeObjectURL = vi.spyOn(URL, 'revokeObjectURL');
+
+    const write = port.writeAndOpen('x.eml', new TextEncoder().encode('x'));
+    await downloads.settle({ id: 1, state: { current: 'complete' } });
+    await write;
+
+    expect(revokeObjectURL).toHaveBeenCalledTimes(1);
   });
 
   it('opens the download once it completes, so the mail client presents it ready to go (ADR-0003)', async () => {

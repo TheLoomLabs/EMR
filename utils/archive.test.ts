@@ -62,7 +62,7 @@ describe('DownloadsArchivePort', () => {
     expect(options.saveAs).toBe(false);
   });
 
-  it('never asks the browser to download anything but the bytes it was given, as a data: URL', async () => {
+  it('never asks the browser to download anything but the bytes it was given, as a blob: URL', async () => {
     const downloads = stubDownloads();
     const port = new DownloadsArchivePort();
     const bytes = new TextEncoder().encode('hello archive');
@@ -72,7 +72,21 @@ describe('DownloadsArchivePort', () => {
     await write;
 
     const [options] = downloads.download.mock.calls[0];
-    expect(options.url).toBe(`data:application/octet-stream;base64,${btoa('hello archive')}`);
+    expect(options.url).toMatch(/^blob:/);
+  });
+
+  it('revokes the blob: URL only once the download settles, never before', async () => {
+    const downloads = stubDownloads();
+    const port = new DownloadsArchivePort();
+    const revokeObjectURL = vi.spyOn(URL, 'revokeObjectURL');
+
+    const write = port.write('path/to/file.xml', new TextEncoder().encode('x'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(revokeObjectURL).not.toHaveBeenCalled(); // download() resolved, not settled yet
+
+    await downloads.settle({ id: 1, state: { current: 'complete' } });
+    await write;
+    expect(revokeObjectURL).toHaveBeenCalledTimes(1);
   });
 
   it('base64-encodes a large payload without blowing the call stack', async () => {
