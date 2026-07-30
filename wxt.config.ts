@@ -1,0 +1,9 @@
+import { defineConfig } from 'wxt';
+
+// See https://wxt.dev/api/config.html
+export default defineConfig({
+  manifestVersion: 3,
+  manifest: {
+    permissions: ['unlimitedStorage'],
+  },
+});

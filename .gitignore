@@ -1,0 +1,9 @@
+# Network captures from the Portal — contain session cookies and real invoice data.
+# See docs/capturing-portal-requests.md
+captures/
+*.har
+
+node_modules/
+.output/
+.wxt/
+dist/
