@@ -5,7 +5,7 @@ import type { Clock } from './clock';
 import type { Delay } from './delay';
 import { listDocuments } from './portal';
 import type { DocumentRow, PortalPort, RawSearchResponse, SearchRequest } from './portal';
-import { EXPORT_DELAY_MS, run, type RunPortalPort, type RunPorts, type RunStore } from './run';
+import { EXPORT_DELAY_MS, run, type RunPortalPort, type RunPorts, type RunProgress, type RunStore } from './run';
 import type { Settings } from './store';
 
 const XML_HEX = 'deadbeefdeadbeefdeadbeefdeadbeef';
@@ -242,6 +242,9 @@ describe('run', () => {
       ],
       skipped: [],
       failed: [],
+      yearStraddles: [],
+      nepoznato: [],
+      drift: [],
     });
     expect([...archive.files.keys()].sort()).toEqual([
       'Arhiva/Primatelj d.o.o/2026/02/Izdavatelj d.o.o/2026-02-28_5-1-1.pdf',
@@ -315,7 +318,14 @@ describe('run', () => {
 
     const report = await run(ports({ portal, archive, store }));
 
-    expect(report).toEqual({ filed: [], skipped: [1], failed: [] });
+    expect(report).toEqual({
+      filed: [],
+      skipped: [1],
+      failed: [],
+      yearStraddles: [],
+      nepoznato: [],
+      drift: [],
+    });
     expect(archive.files.size).toBe(0);
     expect(portal.exportCalls).toEqual([]);
   });
@@ -334,7 +344,14 @@ describe('run', () => {
 
     const secondReport = await run(ports({ portal: new FakeRunPortalPort(rows, exports), archive, store }));
 
-    expect(secondReport).toEqual({ filed: [], skipped: [1, 2], failed: [] });
+    expect(secondReport).toEqual({
+      filed: [],
+      skipped: [1, 2],
+      failed: [],
+      yearStraddles: [],
+      nepoznato: [],
+      drift: [],
+    });
     expect(archive.writeLog).toHaveLength(writesAfterFirstRun);
   });
 
@@ -606,5 +623,149 @@ describe('run', () => {
     // Three real Exports (3, 4, 5) → two waits between them. Document 2 never reached the
     // Portal, so it contributes no wait of its own.
     expect(delay.waits).toEqual([EXPORT_DELAY_MS, EXPORT_DELAY_MS]);
+  });
+
+  describe('the run report (issue #10)', () => {
+    it('lists a filed Document under yearStraddles when its Datum izdavanja and Datum zaprimanja fall in different Zagreb years (ADR-0006)', async () => {
+      const rows = [
+        row({
+          id: 1,
+          datumIzdavanja: 1766876400000, // 2025-12-28 Zagreb
+          datumZaprimanja: 1767654000000, // 2026-01-06 Zagreb
+        }),
+      ];
+      const portal = new FakeRunPortalPort(rows, new Map([[1, buildExportZip(1)]]));
+
+      const report = await run(ports({ portal }));
+
+      expect(report.filed).toMatchObject([{ documentId: 1 }]);
+      expect(report.yearStraddles).toEqual([1]);
+    });
+
+    it('does not list a filed Document under yearStraddles when both dates fall in the same Zagreb year', async () => {
+      const rows = [row({ id: 1 })]; // fixture's datumIzdavanja and datumZaprimanja already agree
+      const portal = new FakeRunPortalPort(rows, new Map([[1, buildExportZip(1)]]));
+
+      const report = await run(ports({ portal }));
+
+      expect(report.yearStraddles).toEqual([]);
+    });
+
+    it('lists a filed Document under nepoznato when its vrstaDokumenta.code marks NEPOZNATO, having still filed it', async () => {
+      const rows = [row({ id: 1, vrstaDokumenta: { code: 130 } })]; // 130 is explicitly NEPOZNATO
+      const portal = new FakeRunPortalPort(rows, new Map([[1, buildExportZip(1)]]));
+
+      const report = await run(ports({ portal }));
+
+      expect(report.filed).toMatchObject([{ documentId: 1 }]);
+      expect(report.nepoznato).toEqual([1]);
+      expect(report.drift).toEqual([]); // 130 is a known code, not drift
+    });
+
+    it('surfaces a vrstaDokumenta.code absent from the shipped list as drift, without stopping the Run, and it also reads as nepoznato', async () => {
+      const rows = [row({ id: 1, vrstaDokumenta: { code: 9999 } }), row({ id: 2 })];
+      const portal = new FakeRunPortalPort(rows, new Map([[1, buildExportZip(1)], [2, buildExportZip(2)]]));
+
+      const report = await run(ports({ portal }));
+
+      expect(report.filed.map((f) => f.documentId)).toEqual([1, 2]);
+      expect(report.failed).toEqual([]);
+      expect(report.drift).toEqual([{ documentId: 1, code: 9999 }]);
+      expect(report.nepoznato).toEqual([1]);
+    });
+
+    it('does not report a failed Document under yearStraddles, nepoznato or drift', async () => {
+      const rows = [row({ id: 1, kupac: undefined, vrstaDokumenta: { code: 9999 } })];
+      const portal = new FakeRunPortalPort(rows, new Map());
+
+      const report = await run(ports({ portal }));
+
+      expect(report.failed).toMatchObject([{ documentId: 1 }]);
+      expect(report.yearStraddles).toEqual([]);
+      expect(report.nepoznato).toEqual([]);
+      expect(report.drift).toEqual([]);
+    });
+
+    it('does not report an Ordinary invoice under nepoznato or drift', async () => {
+      const rows = [row({ id: 1, vrstaDokumenta: { code: 380 } })];
+      const portal = new FakeRunPortalPort(rows, new Map([[1, buildExportZip(1)]]));
+
+      const report = await run(ports({ portal }));
+
+      expect(report.nepoznato).toEqual([]);
+      expect(report.drift).toEqual([]);
+    });
+  });
+
+  describe('progress (issue #10)', () => {
+    it('reports the Document currently being fetched and running totals as the Run proceeds', async () => {
+      const rows = [row({ id: 1 }), row({ id: 2, kupac: undefined }), row({ id: 3 })];
+      const store = new FakeRunStore(settings);
+      await store.markFiled(1, 1);
+      const exports = new Map([[3, buildExportZip(3)]]);
+      const portal = new FakeRunPortalPort(rows, exports);
+      const snapshots: RunProgress[] = [];
+
+      await run(ports({ portal, store }), { onProgress: (p) => snapshots.push(p) });
+
+      expect(snapshots).toEqual([
+        { currentDocumentId: null, filed: 0, skipped: 1, failed: 0 }, // 1 skipped (already Filed)
+        { currentDocumentId: 2, filed: 0, skipped: 1, failed: 0 }, // fetching 2 starts
+        { currentDocumentId: null, filed: 0, skipped: 1, failed: 1 }, // 2 fails validation
+        { currentDocumentId: 3, filed: 0, skipped: 1, failed: 1 }, // fetching 3 starts
+        { currentDocumentId: null, filed: 1, skipped: 1, failed: 1 }, // 3 filed
+      ]);
+    });
+
+    it('reports nothing skipped or fetched when every Document is already Filed', async () => {
+      const rows = [row({ id: 1 })];
+      const store = new FakeRunStore(settings);
+      await store.markFiled(1, 1);
+      const snapshots: RunProgress[] = [];
+
+      await run(ports({ portal: new FakeRunPortalPort(rows, new Map()), store }), {
+        onProgress: (p) => snapshots.push(p),
+      });
+
+      expect(snapshots).toEqual([{ currentDocumentId: null, filed: 0, skipped: 1, failed: 0 }]);
+    });
+  });
+
+  describe('retrying just the failures (issue #10, documentIds)', () => {
+    it('walks only the given Document ids, leaving the rest untouched', async () => {
+      const rows = [row({ id: 1 }), row({ id: 2 }), row({ id: 3 })];
+      const exports = new Map([[2, buildExportZip(2)]]);
+      const portal = new FakeRunPortalPort(rows, exports);
+
+      const report = await run(ports({ portal }), { documentIds: [2] });
+
+      expect(report.filed).toMatchObject([{ documentId: 2 }]);
+      expect(report.skipped).toEqual([]);
+      expect(report.failed).toEqual([]);
+      expect(portal.exportCalls).toEqual([2]);
+    });
+
+    it('re-files only the previously failed ids, and does not re-attempt an id that is not in the filter even if unfiled', async () => {
+      const rows = [row({ id: 1 }), row({ id: 2 })];
+      const exports = new Map([[1, buildExportZip(1)]]);
+      const portal = new FakeRunPortalPort(rows, exports);
+
+      const report = await run(ports({ portal }), { documentIds: [1] });
+
+      expect(report.filed.map((f) => f.documentId)).toEqual([1]);
+      expect(portal.exportCalls).toEqual([1]); // id 2 is unfiled but outside the filter — never touched
+    });
+
+    it('still resolves party names from the full row list, not just the filtered ones (ADR-0008)', async () => {
+      const rows = [
+        row({ id: 1, dobavljac: { oib: '11111111111', naziv: 'Prvo Ime d.o.o.' } }),
+        row({ id: 2, dobavljac: { oib: '11111111111', naziv: 'Drugo Ime d.o.o.' } }),
+      ];
+      const portal = new FakeRunPortalPort(rows, new Map([[2, buildExportZip(2)]]));
+
+      const report = await run(ports({ portal }), { documentIds: [2] });
+
+      expect(report.filed).toMatchObject([{ directory: ['Arhiva', 'Primatelj d.o.o', '2026', '02', 'Prvo Ime d.o.o'] }]);
+    });
   });
 });

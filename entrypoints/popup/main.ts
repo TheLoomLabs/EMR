@@ -8,20 +8,25 @@ import type {
   ListDocumentsResponse,
 } from '@/utils/messages';
 import { summarizeRow } from '@/utils/portal';
-import { run, type RunPortalPort } from '@/utils/run';
+import { formatProgress, summarizeRun } from '@/utils/report';
+import { run, type RunPortalPort, type RunReport } from '@/utils/run';
 import { cacheEracun, getSettings, isFiled, markFiled, pruneEracunCache } from '@/utils/store';
 
 document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
   <h1>EMR</h1>
   <button id="list">Prikaži dokumente</button>
   <button id="preuzmi">Preuzmi</button>
+  <button id="retry" hidden>Ponovi neuspjele</button>
   <p id="status"></p>
+  <div id="report"></div>
   <ul id="rows"></ul>
 `;
 
 const button = document.querySelector<HTMLButtonElement>('#list')!;
 const preuzmiButton = document.querySelector<HTMLButtonElement>('#preuzmi')!;
+const retryButton = document.querySelector<HTMLButtonElement>('#retry')!;
 const status = document.querySelector<HTMLParagraphElement>('#status')!;
+const reportEl = document.querySelector<HTMLDivElement>('#report')!;
 const rowsList = document.querySelector<HTMLUListElement>('#rows')!;
 
 /** Sends `message` to the active tab's content script and unwraps its `{ok, ...} | {ok:false,
@@ -82,25 +87,84 @@ const relayPortalPort: RunPortalPort = {
   },
 };
 
-preuzmiButton.addEventListener('click', async () => {
+/** A report section, appending nothing when there is nothing to say — an empty "Godišnji
+ * prijelazi" heading on every ordinary Run would just be noise. Built with `createElement` and
+ * `textContent`, like `#list`'s own row rendering above, so a failure's reason (utils/run.ts's
+ * RunError messages, embedded verbatim by utils/report.ts) is never interpreted as markup. */
+function renderSection(parent: HTMLElement, heading: string, lines: readonly string[]): void {
+  if (lines.length === 0) return;
+
+  const h2 = document.createElement('h2');
+  h2.textContent = heading;
+  parent.appendChild(h2);
+
+  const list = document.createElement('ul');
+  for (const line of lines) {
+    const item = document.createElement('li');
+    item.textContent = line;
+    list.appendChild(item);
+  }
+  parent.appendChild(list);
+}
+
+function renderReport(report: RunReport): void {
+  const summary = summarizeRun(report);
+  reportEl.innerHTML = '';
+
+  const headline = document.createElement('p');
+  headline.textContent = summary.headline;
+  reportEl.appendChild(headline);
+
+  renderSection(reportEl, 'Neuspjelo', summary.failures);
+  renderSection(reportEl, 'Godišnji prijelazi', summary.yearStraddles);
+  renderSection(reportEl, 'Nepoznata vrsta dokumenta (NEPOZNATO)', summary.nepoznato);
+  renderSection(reportEl, 'Šifra vrste dokumenta nije prepoznata', summary.drift);
+
+  retryButton.hidden = report.failed.length === 0;
+}
+
+// Kept only so "Ponovi neuspjele" knows which Document ids to retry — Runs are safe to repeat
+// at any time (ADR-0004), so nothing here needs to survive the popup closing.
+let lastReport: RunReport | null = null;
+
+/** Runs a Preuzmi, live-updating `status` as each Document is fetched (issue #10) and rendering
+ * the Croatian summary once it ends. `documentIds`, when given, restricts the walk to just those
+ * ids — how the retry-failures button re-runs only what previously failed. */
+async function preuzmi(documentIds?: readonly number[]): Promise<void> {
   preuzmiButton.disabled = true;
+  retryButton.disabled = true;
   status.textContent = 'Preuzimanje…';
 
   try {
-    const report = await run({
-      portal: relayPortalPort,
-      archive: new DownloadsArchivePort(),
-      store: { getSettings, isFiled, markFiled, cacheEracun, pruneEracunCache },
-      clock: systemClock,
-      delay: systemDelay,
-    });
+    const report = await run(
+      {
+        portal: relayPortalPort,
+        archive: new DownloadsArchivePort(),
+        store: { getSettings, isFiled, markFiled, cacheEracun, pruneEracunCache },
+        clock: systemClock,
+        delay: systemDelay,
+      },
+      {
+        documentIds,
+        onProgress: (progress) => {
+          status.textContent = formatProgress(progress);
+        },
+      },
+    );
 
-    status.textContent =
-      `Zapisano: ${report.filed.length}, preskočeno: ${report.skipped.length}, ` +
-      `neuspjelo: ${report.failed.length}.`;
+    lastReport = report;
+    renderReport(report);
   } catch (error) {
     status.textContent = `Greška: ${(error as Error).message}`;
   } finally {
     preuzmiButton.disabled = false;
+    retryButton.disabled = false;
   }
+}
+
+preuzmiButton.addEventListener('click', () => preuzmi());
+
+retryButton.addEventListener('click', () => {
+  if (!lastReport || lastReport.failed.length === 0) return;
+  void preuzmi(lastReport.failed.map((failure) => failure.documentId));
 });
