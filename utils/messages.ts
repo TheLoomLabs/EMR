@@ -15,3 +15,19 @@ export type ListDocumentsResponse =
 export function isListDocumentsMessage(message: unknown): message is ListDocumentsMessage {
   return typeof message === 'object' && message !== null && (message as { type?: unknown }).type === 'emr:list-documents';
 }
+
+export interface ExportDocumentMessage {
+  type: 'emr:export-document';
+  id: number;
+}
+
+export type ExportDocumentResponse = { ok: true; bytes: ArrayBuffer } | { ok: false; error: string };
+
+export function isExportDocumentMessage(message: unknown): message is ExportDocumentMessage {
+  return (
+    typeof message === 'object' &&
+    message !== null &&
+    (message as { type?: unknown }).type === 'emr:export-document' &&
+    typeof (message as { id?: unknown }).id === 'number'
+  );
+}

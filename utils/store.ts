@@ -27,3 +27,21 @@ export function getSettings(): Promise<Settings> {
 export function setSettings(settings: Settings): Promise<void> {
   return settingsItem.setValue(settings);
 }
+
+/** The Filed set (ADR-0007): Document `id` → the instant it was Filed. A cache, not a source of
+ * truth (ADR-0004) — losing it costs a re-fetch, never correctness. */
+const filedItem = storage.defineItem<Record<number, number>>('local:filed', {
+  fallback: {},
+});
+
+export async function isFiled(id: number): Promise<boolean> {
+  const filed = await filedItem.getValue();
+  return id in filed;
+}
+
+/** Records a Document as Filed only once every one of its files is on disk — callers must not
+ * call this before every write for the Document has succeeded. */
+export async function markFiled(id: number, filedAt: number): Promise<void> {
+  const filed = await filedItem.getValue();
+  await filedItem.setValue({ ...filed, [id]: filedAt });
+}

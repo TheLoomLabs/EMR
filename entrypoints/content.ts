@@ -1,5 +1,10 @@
 import { APPTOKEN_EVENT, observeAppToken } from '@/utils/apptoken';
-import { isListDocumentsMessage, type ListDocumentsResponse } from '@/utils/messages';
+import {
+  isExportDocumentMessage,
+  isListDocumentsMessage,
+  type ExportDocumentResponse,
+  type ListDocumentsResponse,
+} from '@/utils/messages';
 import { listDocuments } from '@/utils/portal';
 import { HttpPortalPort } from '@/utils/portal-client';
 
@@ -13,12 +18,23 @@ export default defineContentScript({
       observeAppToken((event as CustomEvent<string>).detail);
     });
 
-    browser.runtime.onMessage.addListener((message: unknown): Promise<ListDocumentsResponse> | undefined => {
-      if (!isListDocumentsMessage(message)) return undefined;
+    browser.runtime.onMessage.addListener(
+      (message: unknown): Promise<ListDocumentsResponse | ExportDocumentResponse> | undefined => {
+        if (isListDocumentsMessage(message)) {
+          return listDocuments(new HttpPortalPort())
+            .then(({ recordsTotal, rows }): ListDocumentsResponse => ({ ok: true, recordsTotal, rows }))
+            .catch((error): ListDocumentsResponse => ({ ok: false, error: (error as Error).message }));
+        }
 
-      return listDocuments(new HttpPortalPort())
-        .then(({ recordsTotal, rows }): ListDocumentsResponse => ({ ok: true, recordsTotal, rows }))
-        .catch((error): ListDocumentsResponse => ({ ok: false, error: (error as Error).message }));
-    });
+        if (isExportDocumentMessage(message)) {
+          return new HttpPortalPort()
+            .exportDocument(message.id)
+            .then((bytes): ExportDocumentResponse => ({ ok: true, bytes }))
+            .catch((error): ExportDocumentResponse => ({ ok: false, error: (error as Error).message }));
+        }
+
+        return undefined;
+      },
+    );
   },
 });

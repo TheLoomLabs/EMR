@@ -10,6 +10,16 @@ import { getAppToken } from './apptoken';
 import { PortalListError, type PortalPort, type RawSearchResponse, type SearchRequest } from './portal';
 
 const LIST_ENDPOINT = '/api/dokumenti/pretraga/ulazni';
+const EXPORT_ENDPOINT = '/api/dokument/akcija/izvezi';
+
+/** Raised when the Export request itself fails at the HTTP level — a transport failure, not a
+ * body that fails validation once fetched (that is ExportValidationError, utils/export.ts). */
+export class PortalExportError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PortalExportError';
+  }
+}
 
 export class HttpPortalPort implements PortalPort {
   async searchInbound(request: SearchRequest): Promise<RawSearchResponse> {
@@ -44,5 +54,27 @@ export class HttpPortalPort implements PortalPort {
 
     const { recordsTotal, data } = body as { recordsTotal: number; data: unknown[] };
     return { recordsTotal, data };
+  }
+
+  /** The Export (issue #4's Implementation Decisions → "The Export"): a JSON array of exactly
+   * one id, even though the endpoint is batch-capable — batching would break the per-Document
+   * atomicity that makes a Run resumable. The response has no Content-Type, so it is read as an
+   * ArrayBuffer unconditionally and left for utils/export.ts to validate and unpack. */
+  async exportDocument(id: number): Promise<ArrayBuffer> {
+    const response = await fetch(EXPORT_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'JavaScript',
+        apptoken: getAppToken(),
+      },
+      body: JSON.stringify([id]),
+    });
+
+    if (!response.ok) {
+      throw new PortalExportError(`export request for id ${id} failed: HTTP ${response.status}`);
+    }
+
+    return response.arrayBuffer();
   }
 }

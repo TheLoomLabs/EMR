@@ -6,7 +6,9 @@ export default defineConfig({
   manifest: {
     // unlimitedStorage: the XML cache (HANDOFF, "Cache"). activeTab: lets the popup
     // (entrypoints/popup/main.ts) find and message the active tab's content script
-    // (issue #7) without needing a host permission for the Portal's origin.
-    permissions: ['unlimitedStorage', 'activeTab'],
+    // (issue #7) without needing a host permission for the Portal's origin. downloads: the
+    // `archive` port's real implementation (ADR-0001, issue #8) writes via
+    // chrome.downloads.download rather than any file-system API.
+    permissions: ['unlimitedStorage', 'activeTab', 'downloads'],
   },
 });
