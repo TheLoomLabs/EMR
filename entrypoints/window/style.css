@@ -385,6 +385,144 @@ body {
   margin-bottom: var(--space-16);
 }
 
+/* --- progress (issue #24) -------------------------------------- */
+.progress {
+  margin-top: var(--space-4);
+}
+.progress .track {
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-sunk);
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.progress .fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: var(--radius-pill);
+  transition: width 0.4s ease;
+}
+.progress .legend {
+  display: flex;
+  gap: var(--space-7);
+  align-items: baseline;
+  margin-top: var(--space-10);
+  font-size: var(--text-13);
+  color: var(--text-muted);
+  flex-wrap: wrap;
+}
+.progress .legend .now {
+  color: var(--text);
+  font-weight: var(--weight-medium);
+}
+.progress .legend .tally {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- run result + report (issue #24) --------------------------- */
+.result {
+  display: flex;
+  align-items: center;
+  gap: var(--space-16);
+}
+.result .glyph {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  flex: none;
+  display: grid;
+  place-items: center;
+  font-size: var(--text-15);
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+.result.has-warn .glyph {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+.result .headline {
+  font-weight: var(--weight-semibold);
+}
+.result .sub {
+  color: var(--text-muted);
+  font-size: var(--text-13);
+}
+.result .actions {
+  margin-left: auto;
+}
+
+.stats {
+  display: flex;
+  gap: var(--space-26);
+  margin-top: var(--space-16);
+  padding-top: var(--space-15);
+  border-top: 1px solid var(--border);
+}
+.stat .v {
+  font-size: var(--text-20);
+  font-weight: var(--weight-bold);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: var(--tracking-tight);
+}
+.stat .k {
+  font-size: var(--text-12);
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-wide);
+}
+.stat.ok .v {
+  color: var(--ok);
+}
+.stat.bad .v {
+  color: var(--danger);
+}
+
+.notice {
+  border-radius: var(--radius);
+  border: 1px solid;
+  padding: var(--space-14) var(--space-16);
+  margin-bottom: var(--space-12);
+  display: flex;
+  gap: var(--space-12);
+  align-items: flex-start;
+}
+.notice .ico {
+  flex: none;
+  font-size: var(--text-14);
+  line-height: 1.4;
+}
+.notice h3 {
+  margin: 0 0 var(--space-5);
+  font-size: var(--text-13);
+  font-weight: var(--weight-bold);
+}
+.notice ul {
+  margin: 0;
+  padding-left: 17px;
+}
+.notice li {
+  margin: var(--space-3) 0;
+  font-size: var(--text-13);
+}
+.notice.bad {
+  background: var(--danger-soft);
+  border-color: color-mix(in srgb, var(--danger) 35%, transparent);
+  color: var(--text);
+}
+.notice.bad .ico,
+.notice.bad h3 {
+  color: var(--danger);
+}
+.notice.warn {
+  background: var(--warn-soft);
+  border-color: color-mix(in srgb, var(--warn) 35%, transparent);
+}
+.notice.warn .ico,
+.notice.warn h3 {
+  color: var(--warn);
+}
+
 /* --- offer (confirm strip) ----------------------------------- */
 .offer {
   border: 1px solid var(--accent);

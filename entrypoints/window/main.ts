@@ -15,9 +15,16 @@ import type {
 } from '@/utils/messages';
 import { groupByIssuer, type IssuerGroup } from '@/utils/portal';
 import { PORTAL_ORIGIN, selectPortalTab } from '@/utils/portal-tab';
-import { formatBackfillOffer, formatBundleOffer, formatProgress, summarizeRun } from '@/utils/report';
+import {
+  formatBackfillOffer,
+  formatBundleOffer,
+  progressPercent,
+  summarizeRun,
+  type ReportNotice,
+  type ReportNoticeSeverity,
+} from '@/utils/report';
 import { planWindowRect } from '@/utils/window-geometry';
-import { run, type RunPortalPort, type RunReport } from '@/utils/run';
+import { run, type RunPortalPort, type RunProgress, type RunReport } from '@/utils/run';
 import {
   cacheEracun,
   getCachedEracun,
@@ -78,10 +85,6 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
         </div>
 
         <div id="app-content">
-          <div class="actions actions-lead">
-            <button id="preuzmi" class="btn btn-primary btn-lg">Preuzmi</button>
-            <button id="retry" class="btn btn-secondary" hidden>Ponovi neuspjele</button>
-          </div>
           <div class="offer" id="backfill-offer" hidden>
             <div class="txt"><span id="backfill-offer-text"></span></div>
             <div class="actions">
@@ -89,8 +92,40 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
               <button id="backfill-start" class="btn btn-primary">Započni</button>
             </div>
           </div>
+
+          <div class="card" id="run-card">
+            <div class="card-body">
+              <div class="result" id="run-result">
+                <div class="glyph" id="run-glyph">↓</div>
+                <div>
+                  <div class="headline" id="run-headline">Ready</div>
+                  <div class="sub" id="run-sub">Press Preuzmi to fetch new Documents from the Portal.</div>
+                </div>
+                <div class="actions">
+                  <button id="retry" class="btn btn-secondary" hidden>Ponovi neuspjele</button>
+                  <button id="preuzmi" class="btn btn-primary btn-lg">Preuzmi</button>
+                </div>
+              </div>
+
+              <div class="progress" id="run-progress" hidden>
+                <div class="track"><div class="fill" id="progress-fill" style="width: 0%"></div></div>
+                <div class="legend">
+                  <span class="now" id="progress-now"></span>
+                  <span id="progress-issuer"></span>
+                  <span class="tally" id="progress-tally"></span>
+                </div>
+              </div>
+
+              <div class="stats" id="run-stats" hidden>
+                <div class="stat ok"><div class="v" id="stat-filed">0</div><div class="k">Filed</div></div>
+                <div class="stat"><div class="v" id="stat-skipped">0</div><div class="k">Skipped</div></div>
+                <div class="stat bad"><div class="v" id="stat-failed">0</div><div class="k">Failed</div></div>
+              </div>
+            </div>
+          </div>
+
           <p id="status"></p>
-          <div id="report"></div>
+          <div id="notices"></div>
 
           <div class="card" id="documents-card">
             <div class="card-head">
@@ -225,9 +260,23 @@ const backfillOfferText = document.querySelector<HTMLSpanElement>('#backfill-off
 const backfillStartButton = document.querySelector<HTMLButtonElement>('#backfill-start')!;
 const backfillDeclineButton = document.querySelector<HTMLButtonElement>('#backfill-decline')!;
 const status = document.querySelector<HTMLParagraphElement>('#status')!;
-const reportEl = document.querySelector<HTMLDivElement>('#report')!;
 const documentsCountEl = document.querySelector<HTMLSpanElement>('#documents-count')!;
 const groupsEl = document.querySelector<HTMLDivElement>('#groups')!;
+
+const runResultEl = document.querySelector<HTMLDivElement>('#run-result')!;
+const runGlyphEl = document.querySelector<HTMLDivElement>('#run-glyph')!;
+const runHeadlineEl = document.querySelector<HTMLDivElement>('#run-headline')!;
+const runSubEl = document.querySelector<HTMLDivElement>('#run-sub')!;
+const runProgressEl = document.querySelector<HTMLDivElement>('#run-progress')!;
+const progressFillEl = document.querySelector<HTMLDivElement>('#progress-fill')!;
+const progressNowEl = document.querySelector<HTMLSpanElement>('#progress-now')!;
+const progressIssuerEl = document.querySelector<HTMLSpanElement>('#progress-issuer')!;
+const progressTallyEl = document.querySelector<HTMLSpanElement>('#progress-tally')!;
+const runStatsEl = document.querySelector<HTMLDivElement>('#run-stats')!;
+const statFiledEl = document.querySelector<HTMLDivElement>('#stat-filed')!;
+const statSkippedEl = document.querySelector<HTMLDivElement>('#stat-skipped')!;
+const statFailedEl = document.querySelector<HTMLDivElement>('#stat-failed')!;
+const noticesEl = document.querySelector<HTMLDivElement>('#notices')!;
 
 const bundleMonthInput = document.querySelector<HTMLInputElement>('#bundle-month')!;
 const posaljiButton = document.querySelector<HTMLButtonElement>('#posalji')!;
@@ -512,38 +561,109 @@ const relayBackfillPort: BackfillPort = {
   },
 };
 
-/** A report section, appending nothing when there is nothing to say — an empty "Godišnji
- * prijelazi" heading on every ordinary Run would just be noise. Built with `createElement` and
- * `textContent`, like `#list`'s own row rendering above, so a failure's reason (utils/run.ts's
- * RunError messages, embedded verbatim by utils/report.ts) is never interpreted as markup. */
-function renderSection(parent: HTMLElement, heading: string, lines: readonly string[]): void {
-  if (lines.length === 0) return;
+/** Live progress (issue #24): a bar against the Run's total, the in-flight Document named by its
+ * `broj` and Issuer — never a bare id — alongside running filed/skipped/failed totals. Between
+ * Documents `progress.current` is `null`, including while a skip-check is happening, so only the
+ * totals show; `progressPercent` (utils/report.ts) is the seam's own answer to "is this nearly
+ * done?", never recomputed here. */
+function renderProgress(progress: RunProgress): void {
+  progressFillEl.style.width = `${progressPercent(progress)}%`;
 
-  const h2 = document.createElement('h2');
-  h2.textContent = heading;
-  parent.appendChild(h2);
-
-  const list = document.createElement('ul');
-  for (const line of lines) {
-    const item = document.createElement('li');
-    item.textContent = line;
-    list.appendChild(item);
+  if (progress.current) {
+    progressNowEl.textContent = `Fetching ${progress.current.broj}`;
+    progressIssuerEl.textContent = `· ${progress.current.issuerName}`;
+  } else {
+    progressNowEl.textContent = '';
+    progressIssuerEl.textContent = '';
   }
-  parent.appendChild(list);
+
+  const processed = progress.filed + progress.skipped + progress.failed;
+  progressTallyEl.textContent = `${processed} / ${progress.total} · ${progress.filed} filed · ${progress.skipped} skipped · ${progress.failed} failed`;
 }
 
+/** One notice's display text, built from utils/report.ts's structured `ReportNotice` — the
+ * prose lives here, in the renderer, not in the seam (issue #24). */
+function noticeText(notice: ReportNotice): string {
+  switch (notice.kind) {
+    case 'failed':
+      return `Document ${notice.broj} (${notice.issuerName}) — ${notice.reason}`;
+    case 'yearStraddle':
+      return `Year straddle — Document ${notice.broj} (${notice.issuerName}), filed under ${notice.filedYear}.`;
+    case 'nepoznato':
+      return `Unknown type (NEPOZNATO) — Document ${notice.broj} (${notice.issuerName}), filed but worth checking in the Portal.`;
+    case 'drift':
+      return `Unrecognised type code — Document ${notice.broj} (${notice.issuerName}) carries type code ${notice.code}, not on our list.`;
+  }
+}
+
+/** One severity-graded notice block — red for `failed` ("not filed, act on this"), amber for
+ * `attention` ("filed, but go and look in the Portal"). Appends nothing when there is nothing to
+ * say, so an ordinary clean Run shows neither block. Built with `createElement` and
+ * `textContent`, never `innerHTML`, so a failure's reason (utils/run.ts's RunError messages,
+ * embedded verbatim by utils/report.ts) can never be interpreted as markup. */
+function renderNoticeBlock(severity: ReportNoticeSeverity, heading: string, notices: readonly ReportNotice[]): void {
+  if (notices.length === 0) return;
+
+  const block = document.createElement('div');
+  block.className = severity === 'failed' ? 'notice bad' : 'notice warn';
+
+  const icon = document.createElement('span');
+  icon.className = 'ico';
+  icon.textContent = severity === 'failed' ? '✕' : '!';
+  block.appendChild(icon);
+
+  const body = document.createElement('div');
+  const h3 = document.createElement('h3');
+  h3.textContent = heading;
+  body.appendChild(h3);
+
+  const list = document.createElement('ul');
+  for (const notice of notices) {
+    const item = document.createElement('li');
+    item.textContent = noticeText(notice);
+    list.appendChild(item);
+  }
+  body.appendChild(list);
+  block.appendChild(body);
+
+  noticesEl.appendChild(block);
+}
+
+/** The end-of-Run report (issue #24): opens with whether anything needs attention, before any
+ * detail; filed/skipped/failed as counters; failures red and named by Document and reason;
+ * Year straddles, NEPOZNATO and code drift amber and never read as failures — the severity split
+ * comes straight from `summarizeRun` (utils/report.ts), decided there, not here. */
 function renderReport(report: RunReport): void {
   const summary = summarizeRun(report);
-  reportEl.innerHTML = '';
+  // A single Document can carry more than one notice (e.g. NEPOZNATO and code drift together),
+  // so the headline counts distinct Documents needing a look, not raw notices — otherwise one
+  // Document could be reported as two.
+  const documentsNeedingAttention = new Set(summary.notices.map((notice) => notice.documentId)).size;
 
-  const headline = document.createElement('p');
-  headline.textContent = summary.headline;
-  reportEl.appendChild(headline);
+  runResultEl.classList.toggle('has-warn', summary.needsAttention);
+  runGlyphEl.textContent = summary.needsAttention ? '!' : '✓';
+  runHeadlineEl.textContent = summary.needsAttention
+    ? `Run finished — ${documentsNeedingAttention} ${documentsNeedingAttention === 1 ? 'Document needs' : 'Documents need'} a look`
+    : 'Run finished — up to date';
+  runSubEl.textContent = 'Everything that could be filed, was. Nothing was lost.';
 
-  renderSection(reportEl, 'Neuspjelo', summary.failures);
-  renderSection(reportEl, 'Godišnji prijelazi', summary.yearStraddles);
-  renderSection(reportEl, 'Nepoznata vrsta dokumenta (NEPOZNATO)', summary.nepoznato);
-  renderSection(reportEl, 'Šifra vrste dokumenta nije prepoznata', summary.drift);
+  runProgressEl.hidden = true;
+  runStatsEl.hidden = false;
+  statFiledEl.textContent = String(summary.filed);
+  statSkippedEl.textContent = String(summary.skipped);
+  statFailedEl.textContent = String(summary.failed);
+
+  noticesEl.innerHTML = '';
+  renderNoticeBlock(
+    'failed',
+    'Failed — not filed',
+    summary.notices.filter((notice) => notice.severity === 'failed'),
+  );
+  renderNoticeBlock(
+    'attention',
+    'Filed, but worth checking in the Portal',
+    summary.notices.filter((notice) => notice.severity === 'attention'),
+  );
 
   retryButton.hidden = report.failed.length === 0;
 }
@@ -552,14 +672,23 @@ function renderReport(report: RunReport): void {
 // at any time (ADR-0004), so nothing here needs to survive the window closing.
 let lastReport: RunReport | null = null;
 
-/** Runs a Preuzmi, live-updating `status` as each Document is fetched (issue #10) and rendering
- * the Croatian summary once it ends. `documentIds`, when given, restricts the walk to just those
+/** Runs a Preuzmi, live-updating the progress bar as each Document is fetched (issue #24) and
+ * rendering the report once it ends. `documentIds`, when given, restricts the walk to just those
  * ids — how the retry-failures button re-runs only what previously failed. */
 async function preuzmi(documentIds?: readonly number[]): Promise<void> {
   setButtonBusy(preuzmiButton, true);
   retryButton.disabled = true;
-  status.textContent = 'Preuzimanje…';
+  status.textContent = '';
   runInProgress = true;
+
+  runResultEl.classList.remove('has-warn');
+  runGlyphEl.textContent = '↓';
+  runHeadlineEl.textContent = 'Downloading…';
+  runSubEl.textContent = 'Documents already filed are skipped without being fetched.';
+  runStatsEl.hidden = true;
+  noticesEl.innerHTML = '';
+  runProgressEl.hidden = false;
+  renderProgress({ total: 0, current: null, filed: 0, skipped: 0, failed: 0 });
 
   try {
     const report = await run(
@@ -572,16 +701,18 @@ async function preuzmi(documentIds?: readonly number[]): Promise<void> {
       },
       {
         documentIds,
-        onProgress: (progress) => {
-          status.textContent = formatProgress(progress);
-        },
+        onProgress: renderProgress,
       },
     );
 
     lastReport = report;
     renderReport(report);
   } catch (error) {
-    status.textContent = `Greška: ${(error as Error).message}`;
+    runProgressEl.hidden = true;
+    runGlyphEl.textContent = '↓';
+    runHeadlineEl.textContent = 'Ready';
+    runSubEl.textContent = 'Press Preuzmi to fetch new Documents from the Portal.';
+    status.textContent = `Error: ${(error as Error).message}`;
   } finally {
     setButtonBusy(preuzmiButton, false);
     retryButton.disabled = false;

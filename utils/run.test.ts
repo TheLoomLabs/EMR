@@ -464,6 +464,22 @@ describe('run', () => {
     },
   );
 
+  it("names a failed Document's Issuer by the ADR-0008 resolved name, not its own row's naziv, when the two differ", async () => {
+    const rows = [
+      row({ id: 1, dobavljac: { oib: '11111111111', naziv: 'Prvo Ime d.o.o.' } }),
+      row({ id: 2, dobavljac: { oib: '11111111111', naziv: 'Drugo Ime d.o.o.' }, kupac: undefined }),
+    ];
+    const store = new FakeRunStore(settings);
+    await store.markFiled(1, 1);
+    const portal = new FakeRunPortalPort(rows, new Map());
+
+    const report = await run(ports({ portal, store }));
+
+    expect(report.failed).toEqual([
+      { documentId: 2, broj: '2/1/1', issuerName: 'Prvo Ime d.o.o.', error: expect.any(String) },
+    ]);
+  });
+
   it('files the target Document even when an unrelated, already-Filed historical row is malformed', async () => {
     // A row missing `kupac` entirely — malformed, but irrelevant to today's target and already
     // Filed. It must not abort the Run ("a failure to stop only its own Document", issue #1).
@@ -639,7 +655,9 @@ describe('run', () => {
       const report = await run(ports({ portal }));
 
       expect(report.filed).toMatchObject([{ documentId: 1 }]);
-      expect(report.yearStraddles).toEqual([1]);
+      expect(report.yearStraddles).toEqual([
+        { documentId: 1, broj: '1/1/1', issuerName: 'Izdavatelj d.o.o.', filedYear: 2025 },
+      ]);
     });
 
     it('does not list a filed Document under yearStraddles when both dates fall in the same Zagreb year', async () => {
@@ -658,7 +676,7 @@ describe('run', () => {
       const report = await run(ports({ portal }));
 
       expect(report.filed).toMatchObject([{ documentId: 1 }]);
-      expect(report.nepoznato).toEqual([1]);
+      expect(report.nepoznato).toEqual([{ documentId: 1, broj: '1/1/1', issuerName: 'Izdavatelj d.o.o.' }]);
       expect(report.drift).toEqual([]); // 130 is a known code, not drift
     });
 
@@ -670,8 +688,8 @@ describe('run', () => {
 
       expect(report.filed.map((f) => f.documentId)).toEqual([1, 2]);
       expect(report.failed).toEqual([]);
-      expect(report.drift).toEqual([{ documentId: 1, code: 9999 }]);
-      expect(report.nepoznato).toEqual([1]);
+      expect(report.drift).toEqual([{ documentId: 1, broj: '1/1/1', issuerName: 'Izdavatelj d.o.o.', code: 9999 }]);
+      expect(report.nepoznato).toEqual([{ documentId: 1, broj: '1/1/1', issuerName: 'Izdavatelj d.o.o.' }]);
     });
 
     it('does not report a failed Document under yearStraddles, nepoznato or drift', async () => {
@@ -697,8 +715,8 @@ describe('run', () => {
     });
   });
 
-  describe('progress (issue #10)', () => {
-    it('reports the Document currently being fetched and running totals as the Run proceeds', async () => {
+  describe('progress (issues #10, #24)', () => {
+    it('reports the Document currently being fetched — named by broj and Issuer, never a bare id — the Run total, and running totals as the Run proceeds', async () => {
       const rows = [row({ id: 1 }), row({ id: 2, kupac: undefined }), row({ id: 3 })];
       const store = new FakeRunStore(settings);
       await store.markFiled(1, 1);
@@ -708,12 +726,13 @@ describe('run', () => {
 
       await run(ports({ portal, store }), { onProgress: (p) => snapshots.push(p) });
 
+      const named = (id: number) => ({ documentId: id, broj: `${id}/1/1`, issuerName: 'Izdavatelj d.o.o.' });
       expect(snapshots).toEqual([
-        { currentDocumentId: null, filed: 0, skipped: 1, failed: 0 }, // 1 skipped (already Filed)
-        { currentDocumentId: 2, filed: 0, skipped: 1, failed: 0 }, // fetching 2 starts
-        { currentDocumentId: null, filed: 0, skipped: 1, failed: 1 }, // 2 fails validation
-        { currentDocumentId: 3, filed: 0, skipped: 1, failed: 1 }, // fetching 3 starts
-        { currentDocumentId: null, filed: 1, skipped: 1, failed: 1 }, // 3 filed
+        { total: 3, current: null, filed: 0, skipped: 1, failed: 0 }, // 1 skipped (already Filed)
+        { total: 3, current: named(2), filed: 0, skipped: 1, failed: 0 }, // fetching 2 starts
+        { total: 3, current: null, filed: 0, skipped: 1, failed: 1 }, // 2 fails validation
+        { total: 3, current: named(3), filed: 0, skipped: 1, failed: 1 }, // fetching 3 starts
+        { total: 3, current: null, filed: 1, skipped: 1, failed: 1 }, // 3 filed
       ]);
     });
 
@@ -727,7 +746,18 @@ describe('run', () => {
         onProgress: (p) => snapshots.push(p),
       });
 
-      expect(snapshots).toEqual([{ currentDocumentId: null, filed: 0, skipped: 1, failed: 0 }]);
+      expect(snapshots).toEqual([{ total: 1, current: null, filed: 0, skipped: 1, failed: 0 }]);
+    });
+
+    it('sets total to the Run\'s Document count — the whole list for an ordinary Run, or just the filter for a retry', async () => {
+      const rows = [row({ id: 1 }), row({ id: 2 }), row({ id: 3 })];
+      const exports = new Map([[2, buildExportZip(2)]]);
+      const portal = new FakeRunPortalPort(rows, exports);
+      const snapshots: RunProgress[] = [];
+
+      await run(ports({ portal }), { documentIds: [2], onProgress: (p) => snapshots.push(p) });
+
+      expect(snapshots.every((snapshot) => snapshot.total === 1)).toBe(true);
     });
   });
 

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { BackfillPlan } from './backfill';
 import type { BundlePlan } from './bundle';
-import { formatBackfillOffer, formatBundleOffer, formatProgress, summarizeRun } from './report';
+import { formatBackfillOffer, formatBundleOffer, progressPercent, summarizeRun } from './report';
 import type { RunProgress, RunReport } from './run';
 
 function emptyReport(overrides: Partial<RunReport> = {}): RunReport {
@@ -16,15 +16,29 @@ function emptyReport(overrides: Partial<RunReport> = {}): RunReport {
   };
 }
 
-describe('formatProgress', () => {
-  it('names the Document being fetched, alongside the running totals', () => {
-    const progress: RunProgress = { currentDocumentId: 42, filed: 2, skipped: 1, failed: 0 };
-    expect(formatProgress(progress)).toBe('Dohvaćanje dokumenta 42… Zapisano: 2, preskočeno: 1, neuspjelo: 0.');
+describe('progressPercent', () => {
+  it('is the share of the Run total that has been processed — filed, skipped and failed all count', () => {
+    const progress: RunProgress = { total: 44, current: null, filed: 10, skipped: 15, failed: 3 };
+    expect(progressPercent(progress)).toBe(Math.round((28 / 44) * 100));
   });
 
-  it('shows only the running totals when no Document is currently being fetched', () => {
-    const progress: RunProgress = { currentDocumentId: null, filed: 2, skipped: 1, failed: 3 };
-    expect(formatProgress(progress)).toBe('Zapisano: 2, preskočeno: 1, neuspjelo: 3.');
+  it('does not count a Document currently in flight as processed yet', () => {
+    const progress: RunProgress = {
+      total: 10,
+      current: { documentId: 1, broj: '1/1/1', issuerName: 'Izdavatelj d.o.o.' },
+      filed: 2,
+      skipped: 0,
+      failed: 0,
+    };
+    expect(progressPercent(progress)).toBe(20);
+  });
+
+  it('is 0 for a Run of zero Documents, rather than dividing by zero', () => {
+    expect(progressPercent({ total: 0, current: null, filed: 0, skipped: 0, failed: 0 })).toBe(0);
+  });
+
+  it('is 100 once every Document has been processed', () => {
+    expect(progressPercent({ total: 5, current: null, filed: 3, skipped: 2, failed: 0 })).toBe(100);
   });
 });
 
@@ -83,60 +97,108 @@ describe('formatBundleOffer', () => {
 });
 
 describe('summarizeRun', () => {
-  it('is entirely empty for a Run that filed, skipped and failed nothing', () => {
+  it('needs no attention and carries no notices for a Run that filed, skipped and failed nothing', () => {
     expect(summarizeRun(emptyReport())).toEqual({
-      headline: 'Zapisano: 0, preskočeno: 0, neuspjelo: 0.',
-      failures: [],
-      yearStraddles: [],
-      nepoznato: [],
-      drift: [],
+      needsAttention: false,
+      filed: 0,
+      skipped: 0,
+      failed: 0,
+      notices: [],
     });
   });
 
-  it('counts filed, skipped and failed Documents in the headline', () => {
+  it('counts filed, skipped and failed Documents as plain counters', () => {
     const report = emptyReport({
       filed: [
         { documentId: 1, directory: [], filenames: [] },
         { documentId: 2, directory: [], filenames: [] },
       ],
       skipped: [3],
-      failed: [{ documentId: 4, error: 'boom' }],
+      failed: [{ documentId: 4, broj: '4/1/1', issuerName: 'Izdavatelj d.o.o.', error: 'boom' }],
     });
 
-    expect(summarizeRun(report).headline).toBe('Zapisano: 2, preskočeno: 1, neuspjelo: 1.');
+    const summary = summarizeRun(report);
+    expect(summary.filed).toBe(2);
+    expect(summary.skipped).toBe(1);
+    expect(summary.failed).toBe(1);
+    expect(summary.needsAttention).toBe(true);
   });
 
-  it("names each failure's Document and embeds its reason", () => {
+  it("names a failure's Document by broj and Issuer, never a bare id, and carries its reason verbatim", () => {
     const report = emptyReport({
-      failed: [{ documentId: 7, error: 'Dokumentu 7 nedostaje brojčano polje datumZaprimanja' }],
+      failed: [
+        {
+          documentId: 7,
+          broj: '7/1/1',
+          issuerName: 'Izdavatelj d.o.o.',
+          error: 'Document 7 is missing numeric field datumZaprimanja',
+        },
+      ],
     });
 
-    expect(summarizeRun(report).failures).toEqual([
-      'Dokument 7: Dokumentu 7 nedostaje brojčano polje datumZaprimanja',
+    expect(summarizeRun(report).notices).toEqual([
+      {
+        kind: 'failed',
+        severity: 'failed',
+        documentId: 7,
+        broj: '7/1/1',
+        issuerName: 'Izdavatelj d.o.o.',
+        reason: 'Document 7 is missing numeric field datumZaprimanja',
+      },
     ]);
   });
 
-  it('lists every Year straddle by Document id, in Croatian', () => {
-    const report = emptyReport({ yearStraddles: [9] });
+  it('maps a Year straddle onto severity "attention", never "failed", and states the year it was filed under', () => {
+    const report = emptyReport({
+      yearStraddles: [{ documentId: 9, broj: '9/1/1', issuerName: 'Izdavatelj d.o.o.', filedYear: 2025 }],
+    });
 
-    expect(summarizeRun(report).yearStraddles).toEqual([
-      'Dokument 9: datum izdavanja i datum zaprimanja nisu u istoj godini (godišnji prijelaz) — provjerite ručno u Portalu.',
+    const [notice] = summarizeRun(report).notices;
+    expect(notice).toEqual({
+      kind: 'yearStraddle',
+      severity: 'attention',
+      documentId: 9,
+      broj: '9/1/1',
+      issuerName: 'Izdavatelj d.o.o.',
+      filedYear: 2025,
+    });
+  });
+
+  it('maps a NEPOZNATO Document onto severity "attention", never "failed"', () => {
+    const report = emptyReport({
+      nepoznato: [{ documentId: 11, broj: '11/1/1', issuerName: 'Izdavatelj d.o.o.' }],
+    });
+
+    expect(summarizeRun(report).notices).toEqual([
+      {
+        kind: 'nepoznato',
+        severity: 'attention',
+        documentId: 11,
+        broj: '11/1/1',
+        issuerName: 'Izdavatelj d.o.o.',
+      },
     ]);
   });
 
-  it('lists every NEPOZNATO Document by id, noting it was still filed, in Croatian', () => {
-    const report = emptyReport({ nepoznato: [11] });
+  it('maps a drifted vrstaDokumenta.code onto severity "attention", never "failed", carrying the code', () => {
+    const report = emptyReport({
+      drift: [{ documentId: 13, broj: '13/1/1', issuerName: 'Izdavatelj d.o.o.', code: 9999 }],
+    });
 
-    expect(summarizeRun(report).nepoznato).toEqual([
-      'Dokument 11: nepoznata vrsta dokumenta (NEPOZNATO) — zapisan, ali provjerite ga ručno u Portalu.',
+    expect(summarizeRun(report).notices).toEqual([
+      {
+        kind: 'drift',
+        severity: 'attention',
+        documentId: 13,
+        broj: '13/1/1',
+        issuerName: 'Izdavatelj d.o.o.',
+        code: 9999,
+      },
     ]);
   });
 
-  it('lists every drifted vrstaDokumenta.code with its Document id, in Croatian', () => {
-    const report = emptyReport({ drift: [{ documentId: 13, code: 9999 }] });
-
-    expect(summarizeRun(report).drift).toEqual([
-      'Dokument 13: šifra vrste dokumenta 9999 nije prepoznata (nije na popisu poznatih vrsta).',
-    ]);
+  it('never reports needsAttention for a Run that filed cleanly with no straddle, NEPOZNATO or drift', () => {
+    const report = emptyReport({ filed: [{ documentId: 1, directory: [], filenames: [] }] });
+    expect(summarizeRun(report).needsAttention).toBe(false);
   });
 });

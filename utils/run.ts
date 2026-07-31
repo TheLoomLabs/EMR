@@ -14,7 +14,7 @@ import type { Clock } from './clock';
 import type { Delay } from './delay';
 import { knownDocumentTypeCodes, markedTypeForCode } from './document-types';
 import { unpackExport } from './export';
-import { planFiling, prilogFilename, resolvePartyName, type PartyNameCandidate } from './filing';
+import { planFiling, prilogFilename, resolvePartyName, zagrebDate, type PartyNameCandidate } from './filing';
 import type { DocumentRow } from './portal';
 import type { Settings } from './store';
 
@@ -67,16 +67,34 @@ export interface FiledDocument {
   filenames: readonly string[];
 }
 
-export interface FailedDocument {
+/** A Document named the way the report and live progress (issue #24) show it — by its `broj`
+ * and Issuer, never by a bare internal id. `issuerName` is the resolved Archive folder name
+ * (ADR-0008) for a filed entry, or the row's own `dobavljac.naziv` for a Document still in
+ * flight or one that never reached filing. */
+export interface NamedDocument {
   documentId: number;
+  broj: string;
+  issuerName: string;
+}
+
+export interface FailedDocument extends NamedDocument {
   error: string;
 }
+
+/** A filed Document whose Datum izdavanja and Datum zaprimanja fall in different Zagreb years
+ * (CONTEXT.md, "Year straddle") — surfaced, never filed differently. `filedYear` is the year
+ * segment of its Archive directory, so the report can state which year it landed under. */
+export interface YearStraddleDocument extends NamedDocument {
+  filedYear: number;
+}
+
+/** A filed Document typed NEPOZNATO — filed, but the extension could not classify it. */
+export type NepoznatoDocument = NamedDocument;
 
 /** A filed Document whose `vrstaDokumenta.code` is not in the shipped table (utils/document-types.ts)
  * at all — not even as a known Marked type. Reported so drift in the Portal's code list is
  * visible rather than silently absorbed into NEPOZNATO (issue #10's acceptance criteria). */
-export interface DriftedCode {
-  documentId: number;
+export interface DriftedCode extends NamedDocument {
   code: number;
 }
 
@@ -84,19 +102,15 @@ export interface RunReport {
   filed: FiledDocument[];
   skipped: readonly number[];
   failed: FailedDocument[];
-  /** Filed Document ids whose Datum izdavanja and Datum zaprimanja fall in different Zagreb
-   * years (CONTEXT.md, "Year straddle") — surfaced, never filed differently. */
-  yearStraddles: readonly number[];
-  /** Filed Document ids typed NEPOZNATO — filed, but the extension could not classify them. */
-  nepoznato: readonly number[];
-  /** Filed Documents whose `vrstaDokumenta.code` is missing from the shipped table entirely. */
+  yearStraddles: readonly YearStraddleDocument[];
+  nepoznato: readonly NepoznatoDocument[];
   drift: readonly DriftedCode[];
 }
 
 function requireNumberField(row: DocumentRow, field: string): number {
   const value = row[field];
   if (typeof value !== 'number') {
-    throw new RunError(`Dokumentu ${row.id} nedostaje brojčano polje ${field}`);
+    throw new RunError(`Document ${row.id} is missing numeric field ${field}`);
   }
   return value;
 }
@@ -109,7 +123,7 @@ interface Subject {
 function requireSubject(row: DocumentRow, field: 'dobavljac' | 'kupac'): Subject {
   const value = row[field] as Record<string, unknown> | undefined;
   if (typeof value?.oib !== 'string' || typeof value.naziv !== 'string') {
-    throw new RunError(`Dokumentu ${row.id} nedostaje ${field}.oib ili ${field}.naziv`);
+    throw new RunError(`Document ${row.id} is missing ${field}.oib or ${field}.naziv`);
   }
   return { oib: value.oib, naziv: value.naziv };
 }
@@ -128,14 +142,29 @@ function candidatesFor(rows: readonly DocumentRow[], field: 'dobavljac' | 'kupac
     const value = row[field] as Record<string, unknown> | undefined;
     if (typeof value?.oib !== 'string' || value.oib !== oib) continue;
     if (typeof value.naziv !== 'string') {
-      throw new RunError(`Dokument ${row.id} ima ${field}.oib ${oib}, ali nema ${field}.naziv`);
+      throw new RunError(`Document ${row.id} has ${field}.oib ${oib} but no ${field}.naziv`);
     }
     candidates.push({ id: row.id, naziv: value.naziv });
   }
   if (candidates.length === 0) {
-    throw new RunError(`nijedan dokument nema ${field}.oib ${oib} — naziv mape u Arhivi nije moguće odrediti`);
+    throw new RunError(`no Document has ${field}.oib ${oib} — the Archive folder name cannot be determined`);
   }
   return candidates;
+}
+
+/** The Issuer name a Document is reported under before or without ever reaching a canonical
+ * filing decision — the in-flight Document a progress snapshot names, or one whose validation
+ * failed before `fileDocument` could resolve anything. Prefers the ADR-0008 resolved name (the
+ * same one a filed Document's Archive folder would carry) when the full row list can supply it,
+ * falling back to this row's own, possibly drifted, `naziv` when it cannot — display only; a
+ * Document actually being filed always resolves canonically inside `fileDocument` and fails
+ * loudly if it cannot (ADR-0008's own rule, unrelaxed). */
+function bestEffortIssuerName(row: DocumentRow, rows: readonly DocumentRow[]): string {
+  try {
+    return resolvePartyName(candidatesFor(rows, 'dobavljac', row.dobavljac.oib));
+  } catch {
+    return row.dobavljac.naziv;
+  }
 }
 
 /** `fileDocument`'s result, carrying the reporting signals (issue #10) alongside the
@@ -143,7 +172,10 @@ function candidatesFor(rows: readonly DocumentRow[], field: 'dobavljac' | 'kupac
  * already asserted with `toEqual` in tests, does not have to grow. */
 interface FileOutcome {
   filed: FiledDocument;
+  broj: string;
+  issuerName: string;
   yearStraddle: boolean;
+  filedYear: number;
   code: number;
   knownCode: boolean;
   nepoznato: boolean;
@@ -196,7 +228,10 @@ async function fileDocument(target: DocumentRow, rows: readonly DocumentRow[], p
   const code = target.vrstaDokumenta.code;
   return {
     filed: { documentId: target.id, directory: plan.directory, filenames },
+    broj: target.brojDokumenta,
+    issuerName,
     yearStraddle: plan.yearStraddle,
+    filedYear: zagrebDate(target.datumIzdavanja).year,
     code,
     knownCode: knownDocumentTypeCodes().includes(code),
     nepoznato: markedTypeForCode(code) === 'NEPOZNATO',
@@ -221,11 +256,13 @@ function throttled(portal: RunPortalPort, delay: Delay): RunPortalPort {
   };
 }
 
-/** A live snapshot of a Run in progress (issue #10): which Document's Export is being fetched
- * right now — `null` between Documents, including while a skip-check is happening — and a
- * running total of each outcome so far. */
+/** A live snapshot of a Run in progress (issues #10, #24): which Document's Export is being
+ * fetched right now — `null` between Documents, including while a skip-check is happening,
+ * named by its `broj` and Issuer rather than its bare id, so a progress bar has both a
+ * denominator (`total`) and words for its label. Plus a running total of each outcome so far. */
 export interface RunProgress {
-  currentDocumentId: number | null;
+  total: number;
+  current: NamedDocument | null;
   filed: number;
   skipped: number;
   failed: number;
@@ -258,17 +295,20 @@ export async function run(ports: RunPorts, options: RunOptions = {}): Promise<Ru
   const filed: FiledDocument[] = [];
   const skipped: number[] = [];
   const failed: FailedDocument[] = [];
-  const yearStraddles: number[] = [];
-  const nepoznato: number[] = [];
+  const yearStraddles: YearStraddleDocument[] = [];
+  const nepoznato: NepoznatoDocument[] = [];
   const drift: DriftedCode[] = [];
 
+  // Filtered up front, rather than skipped row-by-row inside the loop, so `total` (issue #24's
+  // progress-bar denominator) reflects exactly the Documents this Run walks — the full list for
+  // an ordinary Run, or just the retried ids for a retry-failures Run.
   const documentIdFilter = options.documentIds ? new Set(options.documentIds) : undefined;
-  const progress: RunProgress = { currentDocumentId: null, filed: 0, skipped: 0, failed: 0 };
+  const targetRows = documentIdFilter ? rows.filter((row) => documentIdFilter.has(row.id)) : rows;
+
+  const progress: RunProgress = { total: targetRows.length, current: null, filed: 0, skipped: 0, failed: 0 };
   const emitProgress = () => options.onProgress?.({ ...progress });
 
-  for (const row of rows) {
-    if (documentIdFilter && !documentIdFilter.has(row.id)) continue;
-
+  for (const row of targetRows) {
     if (await ports.store.isFiled(row.id)) {
       skipped.push(row.id);
       progress.skipped += 1;
@@ -276,22 +316,28 @@ export async function run(ports: RunPorts, options: RunOptions = {}): Promise<Ru
       continue;
     }
 
-    progress.currentDocumentId = row.id;
+    progress.current = { documentId: row.id, broj: row.brojDokumenta, issuerName: bestEffortIssuerName(row, rows) };
     emitProgress();
 
     try {
       const outcome = await fileDocument(row, rows, runPorts);
       filed.push(outcome.filed);
-      if (outcome.yearStraddle) yearStraddles.push(outcome.filed.documentId);
-      if (outcome.nepoznato) nepoznato.push(outcome.filed.documentId);
-      if (!outcome.knownCode) drift.push({ documentId: outcome.filed.documentId, code: outcome.code });
+      const named = { documentId: outcome.filed.documentId, broj: outcome.broj, issuerName: outcome.issuerName };
+      if (outcome.yearStraddle) yearStraddles.push({ ...named, filedYear: outcome.filedYear });
+      if (outcome.nepoznato) nepoznato.push(named);
+      if (!outcome.knownCode) drift.push({ ...named, code: outcome.code });
       progress.filed += 1;
     } catch (error) {
-      failed.push({ documentId: row.id, error: (error as Error).message });
+      failed.push({
+        documentId: row.id,
+        broj: row.brojDokumenta,
+        issuerName: bestEffortIssuerName(row, rows),
+        error: (error as Error).message,
+      });
       progress.failed += 1;
     }
 
-    progress.currentDocumentId = null;
+    progress.current = null;
     emitProgress();
   }
 
