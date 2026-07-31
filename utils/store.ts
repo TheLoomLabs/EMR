@@ -2,6 +2,8 @@
  * configuration there is — the rest of the extension reads them through this module, never
  * through browser storage directly. */
 
+import type { WindowRect } from './window-geometry';
+
 export interface Settings {
   accountantEmail: string;
   subjectTemplate: string;
@@ -26,6 +28,23 @@ export function getSettings(): Promise<Settings> {
 
 export function setSettings(settings: Settings): Promise<void> {
   return settingsItem.setValue(settings);
+}
+
+/** The EMR window's last-known position and size (ADR-0010, issue #21) — restored verbatim the
+ * next time the toolbar icon opens it (entrypoints/background.ts). Like the Filed set, losing
+ * it costs nothing but a default, centred size on the next open, never correctness. Stored as a
+ * `WindowRect` (utils/window-geometry.ts) rather than a second, identical interface — that
+ * module's pure `planWindowRect` is the only thing that needs to know this shape's meaning. */
+const windowGeometryItem = storage.defineItem<WindowRect | null>('local:window-geometry', {
+  fallback: null,
+});
+
+export function getWindowGeometry(): Promise<WindowRect | null> {
+  return windowGeometryItem.getValue();
+}
+
+export function setWindowGeometry(geometry: WindowRect): Promise<void> {
+  return windowGeometryItem.setValue(geometry);
 }
 
 /** The Filed set (ADR-0007): Document `id` → the instant it was Filed. A cache, not a source of

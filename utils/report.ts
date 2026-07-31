@@ -1,12 +1,12 @@
 // Croatian-language text for the Run report and live progress (issue #10). Pure — no DOM — so
-// its content is asserted by test rather than by reading the popup (one of the issue's own
-// acceptance criteria). entrypoints/popup/main.ts is the only caller.
+// its content is asserted by test rather than by reading the window (one of the issue's own
+// acceptance criteria). entrypoints/window/main.ts is the only caller.
 //
 // A failure's reason (RunError, utils/run.ts) is embedded verbatim rather than re-wrapped —
 // run.ts's own messages are already Croatian; an error surfacing from the Portal fetch or the
 // browser's own download API is not ours to translate, and naming the exact field or path is
 // what lets the user act on it. Everything this module writes itself is Croatian, matching the
-// "Greška: …" convention already in the popup.
+// "Greška: …" convention already in entrypoints/window/main.ts.
 
 import type { BackfillPlan } from './backfill';
 import { formatBundleMonth, type BundlePlan } from './bundle';
