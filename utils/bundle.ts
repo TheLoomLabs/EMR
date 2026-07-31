@@ -92,7 +92,7 @@ function dedupeFilename(filename: string, issuerOib: string, used: Set<string>):
  * exact Zagreb month client-side, and reads each Document's cached eRačun XML bytes — never
  * fetching a fresh Export, since only the cache survives a Document once Filed (trap 1). A
  * Document the cache has no entry for fails loudly rather than being silently dropped: it means
- * Preuzmi was never run for it, and a Bundle missing an invoice with no sign of the gap is
+ * Download was never run for it, and a Bundle missing an invoice with no sign of the gap is
  * exactly the failure mode this project treats as unacceptable (HANDOFF, trap 6's spirit). */
 export async function planBundle(port: BundlePortalPort, store: BundleStore, month: BundleMonth): Promise<BundlePlan> {
   const window = bundleWindow(month);
@@ -106,9 +106,7 @@ export async function planBundle(port: BundlePortalPort, store: BundleStore, mon
   for (const row of withinMonth) {
     const bytes = await store.getCachedEracun(row.id);
     if (bytes === undefined) {
-      throw new BundleError(
-        `Dokument ${row.id} (${row.brojDokumenta}) nema predmemorirani eRačun XML — pokrenite Preuzmi prije slanja.`,
-      );
+      throw new BundleError(`Document ${row.id} (${row.brojDokumenta}) has no cached eRačun XML — run Download before sending.`);
     }
     const stem = documentStem({ brojDokumenta: row.brojDokumenta, datumIzdavanja: row.datumIzdavanja, vrstaDokumenta: row.vrstaDokumenta });
     const filename = dedupeFilename(eracunFilename(stem), row.dobavljac.oib, usedFilenames);

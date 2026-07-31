@@ -86,10 +86,10 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
 
         <div id="app-content">
           <div class="offer" id="backfill-offer" hidden>
-            <div class="txt"><span id="backfill-offer-text"></span></div>
+            <div class="txt"><strong id="backfill-offer-text"></strong></div>
             <div class="actions">
-              <button id="backfill-decline" class="btn btn-ghost">Ne sada</button>
-              <button id="backfill-start" class="btn btn-primary">Započni</button>
+              <button id="backfill-decline" class="btn btn-ghost">Not now</button>
+              <button id="backfill-start" class="btn btn-primary">Start</button>
             </div>
           </div>
 
@@ -99,11 +99,11 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
                 <div class="glyph" id="run-glyph">↓</div>
                 <div>
                   <div class="headline" id="run-headline">Ready</div>
-                  <div class="sub" id="run-sub">Press Preuzmi to fetch new Documents from the Portal.</div>
+                  <div class="sub" id="run-sub">Press Run download to fetch new Documents from the Portal.</div>
                 </div>
                 <div class="actions">
-                  <button id="retry" class="btn btn-secondary" hidden>Ponovi neuspjele</button>
-                  <button id="preuzmi" class="btn btn-primary btn-lg">Preuzmi</button>
+                  <button id="retry" class="btn btn-secondary" hidden>Retry failed</button>
+                  <button id="preuzmi" class="btn btn-primary btn-lg">Run download</button>
                 </div>
               </div>
 
@@ -158,20 +158,32 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
           <div class="card">
             <div class="card-body">
               <div class="field">
-                <label for="bundle-month">Mjesec za slanje</label>
+                <label for="bundle-month">Month</label>
                 <input type="month" id="bundle-month" />
+                <div class="hint">A Bundle is always exactly one month of one Recipient.</div>
               </div>
               <div class="actions">
-                <button id="posalji" class="btn btn-primary">Pošalji</button>
+                <button id="posalji" class="btn btn-primary">Prepare message</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="notice warn" id="accountant-missing" hidden>
+            <span class="ico">⚠</span>
+            <div>
+              <h3>Accountant email isn't set</h3>
+              <p>Add the Accountant's email address in Settings before sending a Bundle.</p>
+              <div class="actions">
+                <button id="go-to-settings" type="button" class="btn btn-secondary">Go to Settings</button>
               </div>
             </div>
           </div>
 
           <div class="offer" id="bundle-offer" hidden>
-            <div class="txt"><span id="bundle-offer-text"></span></div>
+            <div class="txt"><strong id="bundle-offer-text"></strong></div>
             <div class="actions">
-              <button id="bundle-cancel" class="btn btn-ghost">Odustani</button>
-              <button id="bundle-compose" class="btn btn-primary">Sastavi</button>
+              <button id="bundle-cancel" class="btn btn-ghost">Cancel</button>
+              <button id="bundle-compose" class="btn btn-primary">Compose</button>
             </div>
           </div>
           <p id="bundle-status"></p>
@@ -256,7 +268,7 @@ for (const gate of portalGatedSections) {
 const preuzmiButton = document.querySelector<HTMLButtonElement>('#preuzmi')!;
 const retryButton = document.querySelector<HTMLButtonElement>('#retry')!;
 const backfillOffer = document.querySelector<HTMLDivElement>('#backfill-offer')!;
-const backfillOfferText = document.querySelector<HTMLSpanElement>('#backfill-offer-text')!;
+const backfillOfferText = document.querySelector<HTMLElement>('#backfill-offer-text')!;
 const backfillStartButton = document.querySelector<HTMLButtonElement>('#backfill-start')!;
 const backfillDeclineButton = document.querySelector<HTMLButtonElement>('#backfill-decline')!;
 const status = document.querySelector<HTMLParagraphElement>('#status')!;
@@ -280,8 +292,10 @@ const noticesEl = document.querySelector<HTMLDivElement>('#notices')!;
 
 const bundleMonthInput = document.querySelector<HTMLInputElement>('#bundle-month')!;
 const posaljiButton = document.querySelector<HTMLButtonElement>('#posalji')!;
+const accountantMissing = document.querySelector<HTMLDivElement>('#accountant-missing')!;
+const goToSettingsButton = document.querySelector<HTMLButtonElement>('#go-to-settings')!;
 const bundleOffer = document.querySelector<HTMLDivElement>('#bundle-offer')!;
-const bundleOfferText = document.querySelector<HTMLSpanElement>('#bundle-offer-text')!;
+const bundleOfferText = document.querySelector<HTMLElement>('#bundle-offer-text')!;
 const bundleComposeButton = document.querySelector<HTMLButtonElement>('#bundle-compose')!;
 const bundleCancelButton = document.querySelector<HTMLButtonElement>('#bundle-cancel')!;
 const bundleStatus = document.querySelector<HTMLParagraphElement>('#bundle-status')!;
@@ -366,7 +380,7 @@ async function sendToPortal<Response extends { ok: true } | { ok: false; error: 
 
   const response = (await browser.tabs.sendMessage(tabId, message)) as Response | undefined;
   if (!response) {
-    throw new Error('nema odgovora — otvorite Ulazni dokumenti u Portalu');
+    throw new Error('No response — reload the Portal tab and try again.');
   }
   if (!response.ok) {
     throw new Error(response.error);
@@ -374,7 +388,7 @@ async function sendToPortal<Response extends { ok: true } | { ok: false; error: 
   return response as Extract<Response, { ok: true }>;
 }
 
-/** True for the duration of a Preuzmi (issue #10's Run) — while one is in flight, the Portal
+/** True for the duration of a Run download (issue #10's Run) — while one is in flight, the Portal
  * tab closing must surface as a Run failure in the report (issue #21's other acceptance), not
  * as the gate below yanking the report out from under the person reading it. Re-checked once
  * the Run ends, so a still-missing Portal tab is reflected the moment it is safe to. */
@@ -511,7 +525,7 @@ function renderDocumentGroups(groups: readonly IssuerGroup[], filedIds: Readonly
 
 /** Loads and renders the Documents card as soon as the Portal is reachable (issue #23's
  * acceptance: "opening Download lists Documents without a further click") — no button gates
- * this any more. Called on Download's first Portal connection and again after every Preuzmi, so
+ * this any more. Called on Download's first Portal connection and again after every Run download, so
  * newly arrived Documents and freshly Filed ones both show up without a manual refresh. */
 async function loadDocuments(): Promise<void> {
   groupsEl.innerHTML = '';
@@ -668,11 +682,11 @@ function renderReport(report: RunReport): void {
   retryButton.hidden = report.failed.length === 0;
 }
 
-// Kept only so "Ponovi neuspjele" knows which Document ids to retry — Runs are safe to repeat
+// Kept only so "Retry failed" knows which Document ids to retry — Runs are safe to repeat
 // at any time (ADR-0004), so nothing here needs to survive the window closing.
 let lastReport: RunReport | null = null;
 
-/** Runs a Preuzmi, live-updating the progress bar as each Document is fetched (issue #24) and
+/** Runs a Run download, live-updating the progress bar as each Document is fetched (issue #24) and
  * rendering the report once it ends. `documentIds`, when given, restricts the walk to just those
  * ids — how the retry-failures button re-runs only what previously failed. */
 async function preuzmi(documentIds?: readonly number[]): Promise<void> {
@@ -711,7 +725,7 @@ async function preuzmi(documentIds?: readonly number[]): Promise<void> {
     runProgressEl.hidden = true;
     runGlyphEl.textContent = '↓';
     runHeadlineEl.textContent = 'Ready';
-    runSubEl.textContent = 'Press Preuzmi to fetch new Documents from the Portal.';
+    runSubEl.textContent = 'Press Run download to fetch new Documents from the Portal.';
     status.textContent = `Error: ${(error as Error).message}`;
   } finally {
     setButtonBusy(preuzmiButton, false);
@@ -732,14 +746,14 @@ function hideBackfillOffer(): void {
 /** On first use (issue #11: no Document has ever been Filed), shows a count and a rough time
  * estimate before any Export is fetched, and lets the user start or decline rather than
  * launching straight into a Run that could be dozens of Documents deep. A declined offer leaves
- * the Filed set empty, so the next Preuzmi click offers backfill again — no separate persisted
- * "declined" state is needed (ADR-0004's promise: losing state costs bandwidth, never
+ * the Filed set empty, so the next Run download click offers backfill again — no separate
+ * persisted "declined" state is needed (ADR-0004's promise: losing state costs bandwidth, never
  * correctness, extended to this decision too). */
 preuzmiButton.addEventListener('click', async () => {
   preuzmiButton.disabled = true;
   try {
     if (!(await hasFiledAny())) {
-      status.textContent = 'Provjera opsega…';
+      status.textContent = 'Checking…';
       const plan = await planBackfill(relayBackfillPort, systemClock);
       pendingBackfillPlan = plan;
       backfillOfferText.textContent = formatBackfillOffer(plan);
@@ -748,7 +762,7 @@ preuzmiButton.addEventListener('click', async () => {
       return;
     }
   } catch (error) {
-    status.textContent = `Greška: ${(error as Error).message}`;
+    status.textContent = `Error: ${(error as Error).message}`;
     return;
   } finally {
     preuzmiButton.disabled = false;
@@ -790,38 +804,56 @@ function hideBundleOffer(): void {
   pendingBundlePlan = null;
 }
 
-/** Pošalji (CONTEXT.md "Bundle"; ADR-0003): plans a month's Bundle and shows its total size
- * before anything is composed (issue #12's acceptance), mirroring the backfill offer's
- * plan-then-confirm shape above. */
+/** Send (CONTEXT.md "Bundle"; ADR-0003): plans a month's Bundle and shows its total size before
+ * anything is composed (issue #12's acceptance), mirroring the backfill offer's plan-then-confirm
+ * shape above. A missing Accountant address reads as a setup gap pointing at Settings, not an
+ * error (issue #25) — `accountantMissing`, not `bundleStatus`, carries that message, with its own
+ * action rather than leaving the person to find Settings on their own. A month with no Documents
+ * says so in `bundleStatus` rather than opening an offer with nothing to Compose (issue #25). */
 posaljiButton.addEventListener('click', async () => {
   const month = parseBundleMonth(bundleMonthInput.value);
   if (!month) {
-    bundleStatus.textContent = 'Odaberite mjesec.';
+    bundleStatus.textContent = 'Choose a month.';
     return;
   }
 
   setButtonBusy(posaljiButton, true);
-  bundleStatus.textContent = 'Provjera opsega…';
+  accountantMissing.hidden = true;
+  hideBundleOffer();
+  bundleStatus.textContent = 'Checking…';
   try {
     // Checked here, not just left for composeBundle to embed an empty To: — settings.accountantEmail
     // is what the acceptance criterion means by "the recipient address ... come[s] from settings",
-    // and a blank one is a setup gap the user can fix in Postavke, not something to compose past.
+    // and a blank one is a setup gap the user can fix in Settings, not something to compose past.
     const settings = await getSettings();
     if (!settings.accountantEmail) {
-      bundleStatus.textContent = 'Postavite e-mail adresu knjigovođe u Postavkama prije slanja.';
+      bundleStatus.textContent = '';
+      accountantMissing.hidden = false;
       return;
     }
 
     const plan = await planBundle(relayBundlePort, { getCachedEracun }, month);
+    if (plan.documents.length === 0) {
+      bundleStatus.textContent = formatBundleOffer(plan);
+      return;
+    }
     pendingBundlePlan = plan;
     bundleOfferText.textContent = formatBundleOffer(plan);
     bundleOffer.hidden = false;
     bundleStatus.textContent = '';
   } catch (error) {
-    bundleStatus.textContent = `Greška: ${(error as Error).message}`;
+    bundleStatus.textContent = `Error: ${(error as Error).message}`;
   } finally {
     setButtonBusy(posaljiButton, false);
   }
+});
+
+// The setup gap's own action: jumps straight to the field that needs filling in, rather than
+// leaving the person to find Settings on their own (issue #25).
+goToSettingsButton.addEventListener('click', () => {
+  accountantMissing.hidden = true;
+  switchSection('settings');
+  accountantEmailInput.focus();
 });
 
 bundleComposeButton.addEventListener('click', async () => {
@@ -829,15 +861,15 @@ bundleComposeButton.addEventListener('click', async () => {
   if (!plan) return;
 
   setButtonBusy(bundleComposeButton, true);
-  bundleStatus.textContent = 'Sastavljanje…';
+  bundleStatus.textContent = 'Composing…';
   try {
     const settings = await getSettings();
     const eml = composeBundle(plan, settings);
     await new DownloadsEmlWriterPort().writeAndOpen(bundleFilename(settings.subjectTemplate, plan.month), eml);
-    bundleStatus.textContent = 'Poruka je sastavljena i otvorena.';
+    bundleStatus.textContent = 'Message composed and opened.';
     hideBundleOffer();
   } catch (error) {
-    bundleStatus.textContent = `Greška: ${(error as Error).message}`;
+    bundleStatus.textContent = `Error: ${(error as Error).message}`;
   } finally {
     setButtonBusy(bundleComposeButton, false);
   }

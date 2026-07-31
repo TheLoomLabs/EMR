@@ -505,6 +505,13 @@ body {
   margin: var(--space-3) 0;
   font-size: var(--text-13);
 }
+.notice p {
+  margin: 0 0 var(--space-8);
+  font-size: var(--text-13);
+}
+.notice p:last-child {
+  margin-bottom: 0;
+}
 .notice.bad {
   background: var(--danger-soft);
   border-color: color-mix(in srgb, var(--danger) 35%, transparent);

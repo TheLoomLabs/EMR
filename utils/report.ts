@@ -9,28 +9,26 @@
 // fetch or the browser's own download API is not ours to translate, and naming the exact field
 // or path is what lets the user act on it.
 //
-// formatBackfillOffer and formatBundleOffer (issues #11, #12) are untouched by this issue and
-// stay Croatian formatted sentences — only the progress/report seam this issue owns moves to
-// structured, English view models.
+// formatBackfillOffer and formatBundleOffer (issues #11, #12) moved to English sentences by
+// issue #25's sweep — the redesign's acceptance is that no Croatian remains on screen outside
+// eRačun, OIB, Prilog and the Document type names, and these two offers are on screen.
 
 import type { BackfillPlan } from './backfill';
 import { formatBundleMonth, type BundlePlan } from './bundle';
 import type { RunProgress, RunReport } from './run';
 
 /** The first-run backfill offer (issue #11's acceptance: "a count and a time estimate are shown
- * before any Export is fetched"). "Pronađeno dokumenata" rather than "Pronađeno je N dokumenata"
- * sidesteps Croatian noun declension (1 dokument, 2–4 dokumenta, 5+ dokumenata). No estimate line
- * for zero Documents — there is nothing to wait for. */
+ * before any Export is fetched"). No estimate line for zero Documents — there is nothing to
+ * wait for. */
 export function formatBackfillOffer(plan: BackfillPlan): string {
-  const count = `Pronađeno dokumenata: ${plan.recordsTotal}.`;
-  if (plan.recordsTotal === 0) return count;
+  const documentsWord = plan.recordsTotal === 1 ? 'Document' : 'Documents';
+  const headline = `First run — ${plan.recordsTotal} ${documentsWord} found.`;
+  if (plan.recordsTotal === 0) return headline;
 
   const ONE_MINUTE_MS = 60_000;
   const duration =
-    plan.estimatedMillis < ONE_MINUTE_MS
-      ? 'manje od minute'
-      : `približno ${Math.round(plan.estimatedMillis / ONE_MINUTE_MS)} min`;
-  return `${count} Procijenjeno trajanje: ${duration}.`;
+    plan.estimatedMillis < ONE_MINUTE_MS ? 'less than a minute' : `about ${Math.round(plan.estimatedMillis / ONE_MINUTE_MS)} min`;
+  return `${headline} Estimated time: ${duration}.`;
 }
 
 /** The Run's progress bar denominator answered as a percentage (issue #24's acceptance: "a
@@ -50,16 +48,19 @@ function formatSize(bytes: number): string {
   if (bytes < KB) return `${bytes} B`;
   const value = bytes < MB ? bytes / KB : bytes / MB;
   const unit = bytes < MB ? 'KB' : 'MB';
-  return `${value.toFixed(1).replace('.', ',')} ${unit}`;
+  return `${value.toFixed(1)} ${unit}`;
 }
 
 /** The Bundle offer shown before anything is composed (issue #12's acceptance: "sees the
- * resulting Bundle's total size before it is composed"). No size line for zero Documents,
- * mirroring `formatBackfillOffer`'s "nothing to wait for" rule above. */
+ * resulting Bundle's total size before it is composed"; issue #25's acceptance: "a month with no
+ * Documents says so rather than offering an empty Bundle"). The zero-Document sentence is
+ * deliberately shaped differently from the non-zero one — the caller (entrypoints/window/main.ts)
+ * uses this string as the whole of a plain "nothing to send" message in that case, never as an
+ * offer with a Compose action. */
 export function formatBundleOffer(plan: BundlePlan): string {
-  const count = `Dokumenata za ${formatBundleMonth(plan.month)}: ${plan.documents.length}.`;
-  if (plan.documents.length === 0) return count;
-  return `${count} Ukupna veličina: ${formatSize(plan.totalSizeBytes)}.`;
+  if (plan.documents.length === 0) return `No Documents for ${formatBundleMonth(plan.month)}.`;
+  const documentsWord = plan.documents.length === 1 ? 'Document' : 'Documents';
+  return `${formatBundleMonth(plan.month)} — ${plan.documents.length} ${documentsWord}, ${formatSize(plan.totalSizeBytes)}.`;
 }
 
 /** One entry in the run report (issue #24), severity-graded instead of sorted into four
