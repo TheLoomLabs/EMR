@@ -179,8 +179,40 @@ function compareZagrebDate(a: ZagrebDate, b: ZagrebDate): number {
   return a.year - b.year || a.month - b.month || a.day - b.day;
 }
 
-/** A one-line summary for display — the popup shouldn't need to know a row's field shape to
- * show something for it. */
-export function summarizeRow(row: DocumentRow): string {
-  return `${row.brojDokumenta} — ${row.dobavljac.naziv}`;
+/** A group of Documents sharing one Issuer OIB, for display (issue #23, replacing
+ * summarizeRow). `oib` is the identity; `name` is one display label chosen for the group, never
+ * a list of the several the Issuer's own software may have written (CONTEXT.md's Issuer rule;
+ * docs/portal-api.md recorded seven OIBs arriving under eight `naziv` strings in this
+ * Recipient's own data). */
+export interface IssuerGroup {
+  oib: string;
+  name: string;
+  documents: readonly DocumentRow[];
+}
+
+/** Groups Documents by Issuer OIB — never by `naziv`, which the same Issuer's own software can
+ * write two different ways. The display name follows ADR-0008's rule for the Archive folder
+ * name it mirrors: the `naziv` of the group's lowest-`id`, i.e. earliest, Document. Groups are
+ * ordered the same way — ascending by their earliest Document's `id` — and each group's
+ * Documents are ordered ascending by `id` too, so the result is deterministic regardless of the
+ * order `rows` happened to arrive in. */
+export function groupByIssuer(rows: readonly DocumentRow[]): IssuerGroup[] {
+  const documentsByOib = new Map<string, DocumentRow[]>();
+  for (const row of rows) {
+    const oib = row.dobavljac.oib;
+    const existing = documentsByOib.get(oib);
+    if (existing) {
+      existing.push(row);
+    } else {
+      documentsByOib.set(oib, [row]);
+    }
+  }
+
+  const groups: IssuerGroup[] = [];
+  for (const [oib, documents] of documentsByOib) {
+    documents.sort((a, b) => a.id - b.id);
+    groups.push({ oib, name: documents[0].dobavljac.naziv, documents });
+  }
+  groups.sort((a, b) => a.documents[0].id - b.documents[0].id);
+  return groups;
 }

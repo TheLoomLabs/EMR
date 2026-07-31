@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  groupByIssuer,
   listDocuments,
   PortalListError,
-  summarizeRow,
   widenedFilterParams,
   withinZagrebWindow,
   type PortalPort,
@@ -134,11 +134,65 @@ describe('listDocuments', () => {
   });
 });
 
-describe('summarizeRow', () => {
-  it('shows the Document number and the Issuer name, without the caller knowing the row shape', () => {
-    expect(summarizeRow(row({ brojDokumenta: '3343/1/1', dobavljac: { oib: '12345678901', naziv: 'Recolo d.o.o.' } }))).toBe(
-      '3343/1/1 — Recolo d.o.o.',
-    );
+describe('groupByIssuer', () => {
+  it('groups Documents under their Issuer, keyed by OIB', () => {
+    const groups = groupByIssuer([
+      row({ id: 1, dobavljac: { oib: '11111111111', naziv: 'Recolo d.o.o.' } }),
+      row({ id: 2, dobavljac: { oib: '22222222222', naziv: 'HEP ELEKTRA D.O.O.' } }),
+      row({ id: 3, dobavljac: { oib: '11111111111', naziv: 'Recolo d.o.o.' } }),
+    ]);
+
+    expect(groups).toHaveLength(2);
+    expect(groups[0].oib).toBe('11111111111');
+    expect(groups[0].documents.map((d) => d.id)).toEqual([1, 3]);
+    expect(groups[1].oib).toBe('22222222222');
+    expect(groups[1].documents.map((d) => d.id)).toEqual([2]);
+  });
+
+  it('merges two rows carrying one OIB under different naziv strings into a single group', () => {
+    const groups = groupByIssuer([
+      row({ id: 5, dobavljac: { oib: '51264012088', naziv: 'RECOLO d.o.o.' } }),
+      row({ id: 9, dobavljac: { oib: '51264012088', naziv: 'Recolo d.o.o.' } }),
+    ]);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0].documents).toHaveLength(2);
+  });
+
+  it('displays the naziv of the group’s lowest-id Document (ADR-0008’s rule, applied to display too)', () => {
+    const groups = groupByIssuer([
+      row({ id: 9, dobavljac: { oib: '51264012088', naziv: 'Recolo d.o.o.' } }),
+      row({ id: 5, dobavljac: { oib: '51264012088', naziv: 'RECOLO d.o.o.' } }),
+    ]);
+
+    expect(groups[0].name).toBe('RECOLO d.o.o.');
+  });
+
+  it('counts each group’s Documents', () => {
+    const groups = groupByIssuer([
+      row({ id: 1, dobavljac: { oib: '11111111111', naziv: 'A' } }),
+      row({ id: 2, dobavljac: { oib: '11111111111', naziv: 'A' } }),
+      row({ id: 3, dobavljac: { oib: '11111111111', naziv: 'A' } }),
+    ]);
+
+    expect(groups[0].documents).toHaveLength(3);
+  });
+
+  it('orders groups by their earliest Document’s id, and Documents within a group by id, regardless of input order', () => {
+    const groups = groupByIssuer([
+      row({ id: 30, dobavljac: { oib: '22222222222', naziv: 'B' } }),
+      row({ id: 10, dobavljac: { oib: '11111111111', naziv: 'A' } }),
+      row({ id: 20, dobavljac: { oib: '22222222222', naziv: 'B' } }),
+      row({ id: 15, dobavljac: { oib: '11111111111', naziv: 'A' } }),
+    ]);
+
+    expect(groups.map((g) => g.oib)).toEqual(['11111111111', '22222222222']);
+    expect(groups[0].documents.map((d) => d.id)).toEqual([10, 15]);
+    expect(groups[1].documents.map((d) => d.id)).toEqual([20, 30]);
+  });
+
+  it('returns no groups for an empty Document list', () => {
+    expect(groupByIssuer([])).toEqual([]);
   });
 });
 

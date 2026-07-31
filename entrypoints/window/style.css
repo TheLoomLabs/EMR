@@ -38,12 +38,16 @@
 
   --radius: 10px;
   --radius-s: 7px;
+  --radius-xs: 5px;
+  --radius-pill: 999px;
   --shadow: 0 1px 2px rgba(16, 24, 40, 0.05), 0 1px 3px rgba(16, 24, 40, 0.06);
   --shadow-lg: 0 10px 30px rgba(16, 24, 40, 0.12), 0 2px 8px rgba(16, 24, 40, 0.08);
 
   /* spacing scale — one token per value this stylesheet uses for margin/padding/gap */
+  --space-1: 1px;
   --space-2: 2px;
   --space-3: 3px;
+  --space-4: 4px;
   --space-5: 5px;
   --space-7: 7px;
   --space-8: 8px;
@@ -60,9 +64,11 @@
   --space-26: 26px;
   --space-30: 30px;
   --space-34: 34px;
+  --space-40: 40px;
   --space-46: 46px;
 
   /* type scale — font-size, font-weight, letter-spacing and line-height tokens */
+  --text-10: 10px;
   --text-11: 11px;
   --text-12: 12px;
   --text-12-5: 12.5px;
@@ -79,6 +85,7 @@
   --weight-semibold: 600;
   --weight-bold: 650;
 
+  --tracking-snug: -0.005em;
   --tracking-tight: -0.01em;
   --tracking-normal: 0.01em;
   --tracking-wide: 0.04em;
@@ -294,6 +301,11 @@ body {
   font-weight: var(--weight-semibold);
   letter-spacing: var(--tracking-normal);
 }
+.card-head .count {
+  margin-left: auto;
+  font-size: var(--text-12-5);
+  color: var(--text-faint);
+}
 
 /* --- buttons ------------------------------------------------- */
 .btn {
@@ -397,6 +409,93 @@ body {
 .offer .txt span {
   color: var(--text-muted);
   font-size: var(--text-13);
+}
+
+/* --- document groups (issue #23) ------------------------------ */
+.group {
+  border-bottom: 1px solid var(--border);
+}
+.group:last-child {
+  border-bottom: 0;
+}
+.group > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: var(--space-11) var(--space-20);
+  display: flex;
+  align-items: center;
+  gap: var(--space-11);
+}
+.group > summary::-webkit-details-marker {
+  display: none;
+}
+.group > summary:hover {
+  background: var(--surface-sunk);
+}
+.group > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.group .caret {
+  color: var(--text-faint);
+  font-size: var(--text-10);
+  transition: transform 0.15s;
+  flex: none;
+  width: 9px;
+}
+.group[open] .caret {
+  transform: rotate(90deg);
+}
+.group .issuer {
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--tracking-snug);
+}
+.group .n {
+  margin-left: auto;
+  font-size: var(--text-12);
+  font-weight: var(--weight-semibold);
+  color: var(--text-muted);
+  background: var(--surface-sunk);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  padding: var(--space-1) var(--space-9);
+  font-variant-numeric: tabular-nums;
+}
+.docs {
+  list-style: none;
+  margin: 0;
+  padding: 0 var(--space-20) var(--space-12) var(--space-40);
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: var(--space-2) var(--space-18);
+}
+.docs li {
+  font-family: var(--mono);
+  font-size: var(--text-12-5);
+  color: var(--text-muted);
+  padding: var(--space-4) var(--space-8);
+  border-radius: var(--radius-xs);
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+}
+.docs li:hover {
+  background: var(--surface-sunk);
+  color: var(--text);
+}
+.docs .mark {
+  font-size: var(--text-10);
+  width: 10px;
+  flex: none;
+}
+.docs .filed .mark {
+  color: var(--ok);
+}
+.docs .new .mark {
+  color: var(--accent);
+}
+.docs .new {
+  color: var(--text);
 }
 
 /* --- forms --------------------------------------------------- */

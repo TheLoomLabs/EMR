@@ -13,7 +13,7 @@ import type {
   ListDocumentsMessage,
   ListDocumentsResponse,
 } from '@/utils/messages';
-import { summarizeRow } from '@/utils/portal';
+import { groupByIssuer, type IssuerGroup } from '@/utils/portal';
 import { PORTAL_ORIGIN, selectPortalTab } from '@/utils/portal-tab';
 import { formatBackfillOffer, formatBundleOffer, formatProgress, summarizeRun } from '@/utils/report';
 import { planWindowRect } from '@/utils/window-geometry';
@@ -79,7 +79,6 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
 
         <div id="app-content">
           <div class="actions actions-lead">
-            <button id="list" class="btn btn-secondary">Prikaži dokumente</button>
             <button id="preuzmi" class="btn btn-primary btn-lg">Preuzmi</button>
             <button id="retry" class="btn btn-secondary" hidden>Ponovi neuspjele</button>
           </div>
@@ -92,7 +91,14 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
           </div>
           <p id="status"></p>
           <div id="report"></div>
-          <ul id="rows"></ul>
+
+          <div class="card" id="documents-card">
+            <div class="card-head">
+              <h2>Documents</h2>
+              <span class="count" id="documents-count"></span>
+            </div>
+            <div class="groups" id="groups"></div>
+          </div>
         </div>
       </section>
 
@@ -212,7 +218,6 @@ for (const gate of portalGatedSections) {
   });
 }
 
-const button = document.querySelector<HTMLButtonElement>('#list')!;
 const preuzmiButton = document.querySelector<HTMLButtonElement>('#preuzmi')!;
 const retryButton = document.querySelector<HTMLButtonElement>('#retry')!;
 const backfillOffer = document.querySelector<HTMLDivElement>('#backfill-offer')!;
@@ -221,7 +226,8 @@ const backfillStartButton = document.querySelector<HTMLButtonElement>('#backfill
 const backfillDeclineButton = document.querySelector<HTMLButtonElement>('#backfill-decline')!;
 const status = document.querySelector<HTMLParagraphElement>('#status')!;
 const reportEl = document.querySelector<HTMLDivElement>('#report')!;
-const rowsList = document.querySelector<HTMLUListElement>('#rows')!;
+const documentsCountEl = document.querySelector<HTMLSpanElement>('#documents-count')!;
+const groupsEl = document.querySelector<HTMLDivElement>('#groups')!;
 
 const bundleMonthInput = document.querySelector<HTMLInputElement>('#bundle-month')!;
 const posaljiButton = document.querySelector<HTMLButtonElement>('#posalji')!;
@@ -338,15 +344,27 @@ function updatePortalIndicator(connected: boolean): void {
  * Portal") — both, because planning a Run or a Bundle both need the Portal's content script
  * (ADR-0005). Settings alone is excluded from this gate, now that it is a section of its own
  * (issue #22: configuring EMR should not require the Portal to be open). */
+let portalWasConnected = false;
+
 async function refreshPortalAvailability(): Promise<void> {
   const tabId = await findPortalTabId();
-  updatePortalIndicator(tabId !== undefined);
+  const connected = tabId !== undefined;
+  updatePortalIndicator(connected);
 
-  if (runInProgress) return;
-  for (const gate of portalGatedSections) {
-    gate.noPortal.hidden = tabId !== undefined;
-    gate.content.hidden = tabId === undefined;
+  if (!runInProgress) {
+    for (const gate of portalGatedSections) {
+      gate.noPortal.hidden = connected;
+      gate.content.hidden = !connected;
+    }
   }
+
+  // Loads Documents the moment the Portal becomes reachable (issue #23) — not on every
+  // Portal-status refresh, which `tabs.onUpdated` fires far more often than the connection
+  // itself actually changes.
+  if (connected && !portalWasConnected) {
+    void loadDocuments();
+  }
+  portalWasConnected = connected;
 }
 
 browser.tabs.onCreated.addListener(() => void refreshPortalAvailability());
@@ -354,27 +372,120 @@ browser.tabs.onRemoved.addListener(() => void refreshPortalAvailability());
 browser.tabs.onUpdated.addListener(() => void refreshPortalAvailability());
 void refreshPortalAvailability();
 
-button.addEventListener('click', async () => {
-  setButtonBusy(button, true);
-  status.textContent = 'Učitavanje…';
-  rowsList.innerHTML = '';
+/** Builds the empty state for the Documents card (issue #23's acceptance: "Zero Documents
+ * renders a designed empty state, not a blank panel") — the same `.empty` block Download's own
+ * "Portal isn't open" card already uses, so an empty inbox reads as a designed screen rather
+ * than as a bug. */
+function renderEmptyDocuments(): void {
+  const empty = document.createElement('div');
+  empty.className = 'empty';
+
+  const icon = document.createElement('div');
+  icon.className = 'ico';
+  icon.textContent = '○';
+  empty.appendChild(icon);
+
+  const heading = document.createElement('h3');
+  heading.textContent = 'No Documents yet';
+  empty.appendChild(heading);
+
+  const paragraph = document.createElement('p');
+  paragraph.textContent = 'Nothing has arrived from the Portal yet. Documents will appear here as soon as your Recipient receives one.';
+  empty.appendChild(paragraph);
+
+  groupsEl.appendChild(empty);
+}
+
+/** Renders Documents grouped by Issuer (issue #23), replacing the old flat, button-gated list.
+ * `groupByIssuer` (utils/portal.ts) does the grouping; this only arranges the result — one
+ * `<details>` per Issuer, open by default, so seeing the Documents needs no further click
+ * either at the section level or at the group level. Only the Issuer name and `brojDokumenta`
+ * are shown — the OIB is the grouping key, not a displayed field. Every dynamic string is
+ * written with `textContent`, never `innerHTML`, so Portal data can never be interpreted as
+ * markup. */
+function renderDocumentGroups(groups: readonly IssuerGroup[], filedIds: ReadonlySet<number>): void {
+  groupsEl.innerHTML = '';
+
+  const totalDocuments = groups.reduce((sum, group) => sum + group.documents.length, 0);
+  documentsCountEl.textContent = `${totalDocuments} in the Portal · ${groups.length} ${groups.length === 1 ? 'Issuer' : 'Issuers'}`;
+
+  if (groups.length === 0) {
+    renderEmptyDocuments();
+    return;
+  }
+
+  for (const group of groups) {
+    const details = document.createElement('details');
+    details.className = 'group';
+    details.open = true;
+
+    const summary = document.createElement('summary');
+
+    const caret = document.createElement('span');
+    caret.className = 'caret';
+    caret.textContent = '▶';
+    summary.appendChild(caret);
+
+    const issuerName = document.createElement('span');
+    issuerName.className = 'issuer';
+    issuerName.textContent = group.name;
+    summary.appendChild(issuerName);
+
+    const count = document.createElement('span');
+    count.className = 'n';
+    count.textContent = String(group.documents.length);
+    summary.appendChild(count);
+
+    details.appendChild(summary);
+
+    const docsList = document.createElement('ul');
+    docsList.className = 'docs';
+    for (const doc of group.documents) {
+      const filed = filedIds.has(doc.id);
+      const item = document.createElement('li');
+      item.className = filed ? 'filed' : 'new';
+
+      const mark = document.createElement('span');
+      mark.className = 'mark';
+      mark.textContent = filed ? '✓' : '●';
+      mark.title = filed ? 'Filed' : 'Not filed yet';
+      item.appendChild(mark);
+
+      item.appendChild(document.createTextNode(doc.brojDokumenta));
+      docsList.appendChild(item);
+    }
+    details.appendChild(docsList);
+
+    groupsEl.appendChild(details);
+  }
+}
+
+/** Loads and renders the Documents card as soon as the Portal is reachable (issue #23's
+ * acceptance: "opening Download lists Documents without a further click") — no button gates
+ * this any more. Called on Download's first Portal connection and again after every Preuzmi, so
+ * newly arrived Documents and freshly Filed ones both show up without a manual refresh. */
+async function loadDocuments(): Promise<void> {
+  groupsEl.innerHTML = '';
+  documentsCountEl.textContent = '';
+  const loading = document.createElement('p');
+  loading.textContent = 'Loading Documents…';
+  groupsEl.appendChild(loading);
 
   try {
     const message: ListDocumentsMessage = { type: 'emr:list-documents' };
     const response = await sendToPortal<ListDocumentsResponse>(message);
-
-    status.textContent = `Ukupno: ${response.recordsTotal}`;
-    for (const row of response.rows) {
-      const item = document.createElement('li');
-      item.textContent = summarizeRow(row);
-      rowsList.appendChild(item);
-    }
+    const groups = groupByIssuer(response.rows);
+    const filedEntries = await Promise.all(response.rows.map(async (row) => [row.id, await isFiled(row.id)] as const));
+    const filedIds = new Set(filedEntries.filter(([, filed]) => filed).map(([id]) => id));
+    renderDocumentGroups(groups, filedIds);
   } catch (error) {
-    status.textContent = `Greška: ${(error as Error).message}`;
-  } finally {
-    setButtonBusy(button, false);
+    groupsEl.innerHTML = '';
+    documentsCountEl.textContent = '';
+    const p = document.createElement('p');
+    p.textContent = `Error: ${(error as Error).message}`;
+    groupsEl.appendChild(p);
   }
-});
+}
 
 /** Relays the `portal` port's two operations to the Portal's own content script (ADR-0005) —
  * this window itself has no access to the Portal's origin or its live apptoken. */
@@ -476,6 +587,7 @@ async function preuzmi(documentIds?: readonly number[]): Promise<void> {
     retryButton.disabled = false;
     runInProgress = false;
     void refreshPortalAvailability();
+    void loadDocuments();
   }
 }
 
