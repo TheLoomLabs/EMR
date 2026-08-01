@@ -2,10 +2,13 @@ import { describe, expect, it } from 'vitest';
 import {
   BundleError,
   bundleFilename,
+  bundleMonthLabel,
   bundleSubject,
   bundleWindow,
   composeBundle,
+  isReachableBundleMonth,
   planBundle,
+  reachableYearRange,
   type BundlePortalPort,
   type BundleStore,
 } from './bundle';
@@ -53,6 +56,47 @@ describe('bundleWindow', () => {
   it('gets the last day right for a 30-day month and February', () => {
     expect(bundleWindow({ year: 2026, month: 4 }).to).toEqual({ year: 2026, month: 4, day: 30 });
     expect(bundleWindow({ year: 2026, month: 2 }).to).toEqual({ year: 2026, month: 2, day: 28 });
+  });
+});
+
+describe('bundleMonthLabel', () => {
+  it('renders the English month name and year (ADR-0011)', () => {
+    expect(bundleMonthLabel(JULY)).toBe('July 2026');
+    expect(bundleMonthLabel({ year: 2026, month: 1 })).toBe('January 2026');
+  });
+});
+
+describe('isReachableBundleMonth', () => {
+  const now = Date.parse('2026-07-15T00:00:00.000Z'); // Zagreb 2026-07-15
+
+  it('is unreachable before eRačun receipt began', () => {
+    expect(isReachableBundleMonth({ year: 2025, month: 12 }, now)).toBe(false);
+  });
+
+  it('is reachable exactly at the floor', () => {
+    expect(isReachableBundleMonth({ year: 2026, month: 1 }, now)).toBe(true);
+  });
+
+  it('is reachable for the current month but not the month after', () => {
+    expect(isReachableBundleMonth({ year: 2026, month: 7 }, now)).toBe(true);
+    expect(isReachableBundleMonth({ year: 2026, month: 8 }, now)).toBe(false);
+  });
+
+  it('reads the ceiling in Europe/Zagreb, not UTC — a UTC read would place it a month earlier (trap 8)', () => {
+    const zagrebMarch1UtcFeb28 = 1772319600000; // Zagreb 2026-03-01 00:00, UTC 2026-02-28 23:00
+    expect(isReachableBundleMonth({ year: 2026, month: 3 }, zagrebMarch1UtcFeb28)).toBe(true);
+  });
+});
+
+describe('reachableYearRange', () => {
+  it('spans from the eRačun receipt year through the current Zagreb year', () => {
+    expect(reachableYearRange(Date.parse('2026-07-15T00:00:00.000Z'))).toEqual({ min: 2026, max: 2026 });
+    expect(reachableYearRange(Date.parse('2027-03-01T00:00:00.000Z'))).toEqual({ min: 2026, max: 2027 });
+  });
+
+  it('reads the current year in Europe/Zagreb, not UTC — a UTC read would place it a year earlier (trap 8)', () => {
+    const zagrebJan1UtcDec31 = 1767222000000; // Zagreb 2026-01-01 00:00, UTC 2025-12-31 23:00
+    expect(reachableYearRange(zagrebJan1UtcDec31)).toEqual({ min: 2026, max: 2026 });
   });
 });
 

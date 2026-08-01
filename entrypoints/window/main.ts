@@ -2,7 +2,7 @@ import { DownloadsArchivePort } from '@/utils/archive';
 import type { BackfillPlan, BackfillPort } from '@/utils/backfill';
 import { planBackfill } from '@/utils/backfill';
 import { composeBundle, planBundle, type BundleMonth, type BundlePlan, type BundlePortalPort } from '@/utils/bundle';
-import { bundleFilename, bundleSubject } from '@/utils/bundle';
+import { bundleFilename, bundleMonthLabel, bundleSubject, isReachableBundleMonth, MONTH_NAMES, reachableYearRange } from '@/utils/bundle';
 import { systemClock } from '@/utils/clock';
 import { systemDelay } from '@/utils/delay';
 import { DownloadsEmlWriterPort } from '@/utils/eml-writer';
@@ -158,8 +158,27 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
           <div class="card">
             <div class="card-body">
               <div class="field">
-                <label for="bundle-month">Month</label>
-                <input type="month" id="bundle-month" />
+                <label for="bundle-month-trigger">Month</label>
+                <div class="month-picker" id="month-picker">
+                  <button
+                    type="button"
+                    id="bundle-month-trigger"
+                    class="month-trigger"
+                    aria-haspopup="true"
+                    aria-expanded="false"
+                  >
+                    <span id="bundle-month-trigger-text">Choose a month</span>
+                    <span class="chev" aria-hidden="true">▾</span>
+                  </button>
+                  <div class="month-panel" id="month-panel" hidden>
+                    <div class="month-panel-year">
+                      <button type="button" id="month-year-prev" class="month-year-step" aria-label="Previous year">‹</button>
+                      <span class="month-year-label" id="month-year-label"></span>
+                      <button type="button" id="month-year-next" class="month-year-step" aria-label="Next year">›</button>
+                    </div>
+                    <div class="month-grid" id="month-grid"></div>
+                  </div>
+                </div>
                 <div class="hint">A Bundle is always exactly one month of one Recipient.</div>
               </div>
               <div class="actions">
@@ -290,7 +309,14 @@ const statSkippedEl = document.querySelector<HTMLDivElement>('#stat-skipped')!;
 const statFailedEl = document.querySelector<HTMLDivElement>('#stat-failed')!;
 const noticesEl = document.querySelector<HTMLDivElement>('#notices')!;
 
-const bundleMonthInput = document.querySelector<HTMLInputElement>('#bundle-month')!;
+const monthPickerEl = document.querySelector<HTMLDivElement>('#month-picker')!;
+const monthTriggerButton = document.querySelector<HTMLButtonElement>('#bundle-month-trigger')!;
+const monthTriggerTextEl = document.querySelector<HTMLSpanElement>('#bundle-month-trigger-text')!;
+const monthPanelEl = document.querySelector<HTMLDivElement>('#month-panel')!;
+const monthYearLabelEl = document.querySelector<HTMLSpanElement>('#month-year-label')!;
+const monthYearPrevButton = document.querySelector<HTMLButtonElement>('#month-year-prev')!;
+const monthYearNextButton = document.querySelector<HTMLButtonElement>('#month-year-next')!;
+const monthGridEl = document.querySelector<HTMLDivElement>('#month-grid')!;
 const posaljiButton = document.querySelector<HTMLButtonElement>('#posalji')!;
 const accountantMissing = document.querySelector<HTMLDivElement>('#accountant-missing')!;
 const goToSettingsButton = document.querySelector<HTMLButtonElement>('#go-to-settings')!;
@@ -791,11 +817,99 @@ retryButton.addEventListener('click', () => {
  * needs too (utils/bundle.ts's `BundlePortalPort`), so the same relay serves both. */
 const relayBundlePort: BundlePortalPort = relayBackfillPort;
 
-function parseBundleMonth(value: string): BundleMonth | undefined {
-  const match = /^(\d{4})-(\d{2})$/.exec(value);
-  if (!match) return undefined;
-  return { year: Number(match[1]), month: Number(match[2]) };
+/** The month picker (issue #29): a trigger button opening a panel with a year stepper and a
+ * twelve-month grid, replacing `<input type="month">` — unimplemented on Firefox, where it
+ * degrades to a plain text box (the ticket's own motivation). Nothing is preselected; the panel
+ * opens on the chosen month's year, or the current Zagreb year when nothing is chosen yet
+ * (acceptance). `selectedBundleMonth` is this window's only source of truth for Send's month —
+ * there is no hidden input mirroring it, since nothing else needs to read it as a string. */
+let selectedBundleMonth: BundleMonth | undefined;
+let monthPanelYear = zagrebDate(systemClock.now()).year;
+
+function updateMonthTrigger(): void {
+  monthTriggerTextEl.textContent = selectedBundleMonth ? bundleMonthLabel(selectedBundleMonth) : 'Choose a month';
 }
+
+/** Redraws the year stepper and the twelve-month grid for `monthPanelYear` — called on open and
+ * on every year-step, since which months are disabled depends on the year showing. Months after
+ * the current Zagreb month render disabled rather than being omitted (acceptance: a grid missing
+ * its last cells reads as a rendering fault, a grid with greyed cells reads as a rule). */
+function renderMonthPanel(): void {
+  const now = systemClock.now();
+  const { min, max } = reachableYearRange(now);
+  monthYearLabelEl.textContent = String(monthPanelYear);
+  monthYearPrevButton.disabled = monthPanelYear <= min;
+  monthYearNextButton.disabled = monthPanelYear >= max;
+
+  monthGridEl.innerHTML = '';
+  for (let month = 1; month <= 12; month++) {
+    const candidate: BundleMonth = { year: monthPanelYear, month };
+    const cell = document.createElement('button');
+    cell.type = 'button';
+    cell.className = 'month-cell';
+    cell.textContent = MONTH_NAMES[month - 1].slice(0, 3);
+    cell.title = MONTH_NAMES[month - 1];
+    cell.disabled = !isReachableBundleMonth(candidate, now);
+    if (selectedBundleMonth && selectedBundleMonth.year === candidate.year && selectedBundleMonth.month === candidate.month) {
+      cell.classList.add('selected');
+      cell.setAttribute('aria-current', 'true');
+    }
+    cell.addEventListener('click', () => {
+      selectedBundleMonth = candidate;
+      updateMonthTrigger();
+      closeMonthPanel();
+    });
+    monthGridEl.appendChild(cell);
+  }
+}
+
+function handleMonthPanelOutsideClick(event: MouseEvent): void {
+  if (event.target instanceof Node && monthPickerEl.contains(event.target)) return;
+  closeMonthPanel();
+}
+
+function handleMonthPanelKeydown(event: KeyboardEvent): void {
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    closeMonthPanel();
+  }
+}
+
+function openMonthPanel(): void {
+  monthPanelYear = selectedBundleMonth ? selectedBundleMonth.year : zagrebDate(systemClock.now()).year;
+  renderMonthPanel();
+  monthPanelEl.hidden = false;
+  monthTriggerButton.setAttribute('aria-expanded', 'true');
+  document.addEventListener('click', handleMonthPanelOutsideClick, true);
+  document.addEventListener('keydown', handleMonthPanelKeydown, true);
+}
+
+function closeMonthPanel(): void {
+  if (monthPanelEl.hidden) return;
+  monthPanelEl.hidden = true;
+  monthTriggerButton.setAttribute('aria-expanded', 'false');
+  document.removeEventListener('click', handleMonthPanelOutsideClick, true);
+  document.removeEventListener('keydown', handleMonthPanelKeydown, true);
+  monthTriggerButton.focus();
+}
+
+monthTriggerButton.addEventListener('click', () => {
+  if (monthPanelEl.hidden) {
+    openMonthPanel();
+  } else {
+    closeMonthPanel();
+  }
+});
+
+monthYearPrevButton.addEventListener('click', () => {
+  monthPanelYear -= 1;
+  renderMonthPanel();
+});
+
+monthYearNextButton.addEventListener('click', () => {
+  monthPanelYear += 1;
+  renderMonthPanel();
+});
 
 let pendingBundlePlan: BundlePlan | null = null;
 
@@ -811,7 +925,7 @@ function hideBundleOffer(): void {
  * action rather than leaving the person to find Settings on their own. A month with no Documents
  * says so in `bundleStatus` rather than opening an offer with nothing to Compose (issue #25). */
 posaljiButton.addEventListener('click', async () => {
-  const month = parseBundleMonth(bundleMonthInput.value);
+  const month = selectedBundleMonth;
   if (!month) {
     bundleStatus.textContent = 'Choose a month.';
     return;

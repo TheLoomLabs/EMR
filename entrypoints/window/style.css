@@ -689,6 +689,114 @@ body {
   margin-top: var(--space-8);
 }
 
+/* --- month picker (issue #29) --------------------------------- */
+.month-picker {
+  position: relative;
+}
+.month-trigger {
+  font: inherit;
+  width: 100%;
+  padding: var(--space-9) var(--space-11);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-s);
+  background: var(--surface);
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-8);
+  cursor: pointer;
+}
+.month-trigger:focus-visible,
+.month-trigger[aria-expanded='true'] {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.month-trigger .chev {
+  color: var(--text-faint);
+  font-size: var(--text-11);
+}
+.month-panel {
+  position: absolute;
+  z-index: 1;
+  top: calc(100% + var(--space-5));
+  left: 0;
+  width: 260px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  padding: var(--space-11);
+}
+.month-panel-year {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-10);
+}
+.month-year-label {
+  font-weight: var(--weight-semibold);
+  font-size: var(--text-13-5);
+  font-variant-numeric: tabular-nums;
+}
+.month-year-step {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xs);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  font-size: var(--text-14);
+  line-height: 1;
+}
+.month-year-step:hover:not([disabled]) {
+  background: var(--surface-sunk);
+}
+.month-year-step:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.month-year-step[disabled] {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.month-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-7);
+}
+.month-cell {
+  font: inherit;
+  padding: var(--space-8) 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  font-size: var(--text-13);
+}
+.month-cell:hover:not([disabled]) {
+  background: var(--hover-wash);
+}
+.month-cell:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.month-cell.selected {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+  font-weight: var(--weight-semibold);
+}
+.month-cell[disabled] {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
 /* --- empty state --------------------------------------------- */
 .empty {
   text-align: center;

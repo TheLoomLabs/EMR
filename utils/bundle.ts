@@ -10,7 +10,8 @@
 // `composeBundle` then turns that plan into `.eml` bytes via utils/eml.ts, which is pure and
 // tested on its own.
 
-import { documentStem, eracunFilename, sanitizeSegment } from './filing';
+import { ERACUN_RECEIPT_START } from './backfill';
+import { documentStem, eracunFilename, sanitizeSegment, zagrebDate } from './filing';
 import { assembleEml } from './eml';
 import { widenedFilterParams, withinZagrebWindow, type FilterParams, type ListDocumentsResult, type ZagrebWindow } from './portal';
 import type { Settings } from './store';
@@ -66,6 +67,51 @@ export function bundleWindow(month: BundleMonth): ZagrebWindow {
     from: { year: month.year, month: month.month, day: 1 },
     to: { year: month.year, month: month.month, day: daysInZagrebMonth(month) },
   };
+}
+
+/** English calendar month names (ADR-0011), index 0 = January — shared by `bundleMonthLabel`
+ * and the month picker's own grid cells (entrypoints/window/main.ts), so the trigger's label and
+ * the grid's cells can never name a month differently. */
+export const MONTH_NAMES = [
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December',
+];
+
+/** A Bundle month's label as the month picker shows it — "July 2026" — English regardless of
+ * the rest of the window's Croatian text (ADR-0011: month names are English). */
+export function bundleMonthLabel(month: BundleMonth): string {
+  return `${MONTH_NAMES[month.month - 1]} ${month.year}`;
+}
+
+/** Whether `month` can possibly hold a Document: not before eRačun receipt began
+ * (`ERACUN_RECEIPT_START`, utils/backfill.ts — the same floor the first-run backfill anchors to,
+ * so the two can never disagree about when history begins) and not after the current month. Both
+ * bounds are read in Europe/Zagreb, never UTC (trap 8) — a UTC read puts the ceiling on the wrong
+ * month right at a month boundary. The current month itself is reachable. */
+export function isReachableBundleMonth(month: BundleMonth, nowEpochMillis: number): boolean {
+  const floor = ERACUN_RECEIPT_START;
+  if (month.year < floor.year || (month.year === floor.year && month.month < floor.month)) {
+    return false;
+  }
+  const today = zagrebDate(nowEpochMillis);
+  return month.year < today.year || (month.year === today.year && month.month <= today.month);
+}
+
+/** The range of years the month picker's year stepper can reach: from the year eRačun receipt
+ * began through the current Zagreb year — the stepper's arrows disable outside it. Read in
+ * Europe/Zagreb, never UTC, same as `isReachableBundleMonth`. */
+export function reachableYearRange(nowEpochMillis: number): { min: number; max: number } {
+  return { min: ERACUN_RECEIPT_START.year, max: zagrebDate(nowEpochMillis).year };
 }
 
 /** Disambiguates two Documents whose stems collide — possible because a stem is date +
