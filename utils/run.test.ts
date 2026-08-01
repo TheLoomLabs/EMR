@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { ArchivePort } from './archive';
 import type { Clock } from './clock';
 import type { Delay } from './delay';
+import { DownloadRecord, type DownloadRecordEntry, type DownloadRecordPort } from './download-record';
 import { listDocuments } from './portal';
 import type { DocumentRow, PortalPort, RawSearchResponse, SearchRequest } from './portal';
 import { EXPORT_DELAY_MS, run, type RunPortalPort, type RunPorts, type RunProgress, type RunStore } from './run';
@@ -129,6 +130,32 @@ class FakeDelay implements Delay {
   }
 }
 
+/** A `downloadRecord` port serving canned entries, so a test can assert a Document is skipped
+ * without an Export ever being requested (ADR-0013, issue #32). An empty record (the default)
+ * proves nothing present, matching "an empty or missing record fetches everything, exactly as
+ * today". `load` is tracked so a test can assert it is called at most once per Run. */
+class FakeDownloadRecordPort implements DownloadRecordPort {
+  loadCalls = 0;
+
+  constructor(private readonly entries: DownloadRecordEntry[] = []) {}
+
+  async load(): Promise<DownloadRecord> {
+    this.loadCalls += 1;
+    return new DownloadRecord(this.entries);
+  }
+}
+
+/** A download-record entry at the exact absolute path this fixture's Document would land at —
+ * `directory` and `filename` joined the way a real OS path would be, complete and existing
+ * unless overridden. */
+function downloadedFile(
+  directory: readonly string[],
+  filename: string,
+  overrides: Partial<DownloadRecordEntry> = {},
+): DownloadRecordEntry {
+  return { filename: ['/home/user/Downloads', ...directory, filename].join('/'), complete: true, exists: true, ...overrides };
+}
+
 /** Tracks how many `exportDocument` calls are in flight at once, via a real microtask gap
  * (not just a synchronous Map lookup) — the only way to catch a Run that dispatched two
  * Exports without awaiting the first. */
@@ -217,9 +244,15 @@ function ports(overrides: Partial<RunPorts> = {}): RunPorts {
     store: new FakeRunStore(settings),
     clock: new FakeClock(1772233200000),
     delay: new FakeDelay(),
+    downloadRecord: new FakeDownloadRecordPort(),
     ...overrides,
   };
 }
+
+/** This fixture's default Document, filed, lands at exactly this Archive directory (see the
+ * `row` fixture below and the existing filing tests) — the fixed point the new ADR-0013 tests
+ * build their `downloadedFile` entries against. */
+const DEFAULT_DIRECTORY = ['Arhiva', 'Primatelj d.o.o', '2026', '02', 'Izdavatelj d.o.o'];
 
 describe('run', () => {
   it('files every unfiled Document under {root}/{Recipient}/{YYYY}/{MM}/{Issuer}/, with every Prilog', async () => {
@@ -639,6 +672,123 @@ describe('run', () => {
     // Three real Exports (3, 4, 5) → two waits between them. Document 2 never reached the
     // Portal, so it contributes no wait of its own.
     expect(delay.waits).toEqual([EXPORT_DELAY_MS, EXPORT_DELAY_MS]);
+  });
+
+  describe('provably already in the Archive (ADR-0013, issue #32)', () => {
+    it('skips a Document with no Prilozi whose eRačun and visualisation are both recorded, without requesting an Export', async () => {
+      const rows = [row({ id: 5, brojPriloga: 0 })];
+      const downloadRecord = new FakeDownloadRecordPort([
+        downloadedFile(DEFAULT_DIRECTORY, '2026-02-28_5-1-1.xml'),
+        downloadedFile(DEFAULT_DIRECTORY, '2026-02-28_5-1-1.pdf'),
+      ]);
+      const portal = new FakeRunPortalPort(rows, new Map()); // no Export fixture — one would throw if requested
+      const store = new FakeRunStore(settings);
+
+      const report = await run(ports({ portal, store, downloadRecord }));
+
+      expect(report.skipped).toEqual([5]);
+      expect(report.filed).toEqual([]);
+      expect(portal.exportCalls).toEqual([]);
+      expect(await store.isFiled(5)).toBe(true);
+    });
+
+    it('skips a Document whose eRačun, visualisation and every recorded Prilog count matches, by stem prefix, never by guessed filename', async () => {
+      const rows = [row({ id: 5, brojPriloga: 2 })];
+      const downloadRecord = new FakeDownloadRecordPort([
+        downloadedFile(DEFAULT_DIRECTORY, '2026-02-28_5-1-1.xml'),
+        downloadedFile(DEFAULT_DIRECTORY, '2026-02-28_5-1-1.pdf'),
+        // Arbitrary Issuer-given names — never guessed, only counted by their stem prefix.
+        downloadedFile(DEFAULT_DIRECTORY, '2026-02-28_5-1-1_Nešto Sasvim Drugo.pdf'),
+        downloadedFile(DEFAULT_DIRECTORY, '2026-02-28_5-1-1_racun-prilog-7.zip'),
+      ]);
+      const portal = new FakeRunPortalPort(rows, new Map());
+
+      const report = await run(ports({ portal, downloadRecord }));
+
+      expect(report.skipped).toEqual([5]);
+      expect(portal.exportCalls).toEqual([]);
+    });
+
+    it('fetches a Document whose recorded stem-prefixed file count is short of its Prilog count', async () => {
+      const rows = [row({ id: 5, brojPriloga: 2 })];
+      const downloadRecord = new FakeDownloadRecordPort([
+        downloadedFile(DEFAULT_DIRECTORY, '2026-02-28_5-1-1.xml'),
+        downloadedFile(DEFAULT_DIRECTORY, '2026-02-28_5-1-1.pdf'),
+        downloadedFile(DEFAULT_DIRECTORY, '2026-02-28_5-1-1_Prilog-A.pdf'), // only one of two
+      ]);
+      const portal = new FakeRunPortalPort(rows, new Map([[5, buildExportZip(5, ['Prilog-A.pdf', 'Prilog-B.pdf'])]]));
+
+      const report = await run(ports({ portal, downloadRecord }));
+
+      expect(portal.exportCalls).toEqual([5]);
+      expect(report.filed).toMatchObject([{ documentId: 5 }]);
+      expect(report.skipped).toEqual([]);
+    });
+
+    it('fetches a Document whose recorded file no longer exists', async () => {
+      const rows = [row({ id: 5, brojPriloga: 0 })];
+      const downloadRecord = new FakeDownloadRecordPort([
+        downloadedFile(DEFAULT_DIRECTORY, '2026-02-28_5-1-1.xml', { exists: false }),
+        downloadedFile(DEFAULT_DIRECTORY, '2026-02-28_5-1-1.pdf'),
+      ]);
+      const portal = new FakeRunPortalPort(rows, new Map([[5, buildExportZip(5)]]));
+
+      const report = await run(ports({ portal, downloadRecord }));
+
+      expect(portal.exportCalls).toEqual([5]);
+      expect(report.filed).toMatchObject([{ documentId: 5 }]);
+    });
+
+    it('fetches a Document whose recorded write never completed', async () => {
+      const rows = [row({ id: 5, brojPriloga: 0 })];
+      const downloadRecord = new FakeDownloadRecordPort([
+        downloadedFile(DEFAULT_DIRECTORY, '2026-02-28_5-1-1.xml', { complete: false }),
+        downloadedFile(DEFAULT_DIRECTORY, '2026-02-28_5-1-1.pdf'),
+      ]);
+      const portal = new FakeRunPortalPort(rows, new Map([[5, buildExportZip(5)]]));
+
+      const report = await run(ports({ portal, downloadRecord }));
+
+      expect(portal.exportCalls).toEqual([5]);
+      expect(report.filed).toMatchObject([{ documentId: 5 }]);
+    });
+
+    it('fetches every Document, exactly as before this check existed, when the download record is empty', async () => {
+      const rows = [row({ id: 5, brojPriloga: 0 })];
+      const portal = new FakeRunPortalPort(rows, new Map([[5, buildExportZip(5)]]));
+
+      const report = await run(ports({ portal, downloadRecord: new FakeDownloadRecordPort([]) }));
+
+      expect(portal.exportCalls).toEqual([5]);
+      expect(report.filed).toMatchObject([{ documentId: 5 }]);
+    });
+
+    it('queries and indexes the download record once per Run, not once per Document', async () => {
+      const rows = [row({ id: 1, brojPriloga: 0 }), row({ id: 2, brojPriloga: 0 })];
+      const downloadRecord = new FakeDownloadRecordPort([
+        downloadedFile(DEFAULT_DIRECTORY, '2026-02-28_1-1-1.xml'),
+        downloadedFile(DEFAULT_DIRECTORY, '2026-02-28_1-1-1.pdf'),
+      ]);
+      const portal = new FakeRunPortalPort(rows, new Map([[2, buildExportZip(2)]]));
+
+      await run(ports({ portal, downloadRecord }));
+
+      expect(downloadRecord.loadCalls).toBe(1);
+    });
+
+    it('does not run the download-record check for a Document the Filed set already reports as unfiled -> filed (the cheap check still wins)', async () => {
+      // Document 1 is already marked Filed via the store; its download-record entries are
+      // deliberately absent, so if the check ran for it anyway it would (wrongly) fetch it.
+      const rows = [row({ id: 1, brojPriloga: 0 })];
+      const store = new FakeRunStore(settings);
+      await store.markFiled(1, 1);
+      const portal = new FakeRunPortalPort(rows, new Map());
+
+      const report = await run(ports({ portal, store, downloadRecord: new FakeDownloadRecordPort([]) }));
+
+      expect(report.skipped).toEqual([1]);
+      expect(portal.exportCalls).toEqual([]);
+    });
   });
 
   describe('the run report (issue #10)', () => {

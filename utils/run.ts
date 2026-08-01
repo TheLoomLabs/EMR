@@ -7,14 +7,29 @@
 // picks up where it stopped, retrying only what never got Filed.
 //
 // Supersedes the issue #8 tracer bullet, which filed one Document and stopped.
+//
+// Issue #32 (ADR-0013): a Document the Filed set reports as unfiled gets one more chance to be
+// skipped, cheaply — proven already present in the Archive via the browser's own download
+// record (utils/download-record.ts) rather than a Portal request.
 
 import type { ArchivePort } from './archive';
 import { archivePath } from './archive';
 import type { Clock } from './clock';
 import type { Delay } from './delay';
 import { knownDocumentTypeCodes, markedTypeForCode } from './document-types';
+import type { DownloadRecord, DownloadRecordPort } from './download-record';
 import { unpackExport } from './export';
-import { planFiling, prilogFilename, resolvePartyName, zagrebDate, type PartyNameCandidate } from './filing';
+import {
+  archiveDirectory,
+  documentStem,
+  eracunFilename,
+  planFiling,
+  prilogFilename,
+  resolvePartyName,
+  visualisationFilename,
+  zagrebDate,
+  type PartyNameCandidate,
+} from './filing';
 import type { DocumentRow } from './portal';
 import type { Settings } from './store';
 
@@ -54,6 +69,7 @@ export interface RunPorts {
   store: RunStore;
   clock: Clock;
   delay: Delay;
+  downloadRecord: DownloadRecordPort;
 }
 
 /** The pause between one Export finishing and the next one starting. Small, per HANDOFF — this
@@ -167,6 +183,59 @@ function bestEffortIssuerName(row: DocumentRow, rows: readonly DocumentRow[]): s
   }
 }
 
+interface PartyNames {
+  recipientName: string;
+  issuerName: string;
+}
+
+/** The Recipient's and Issuer's Archive-folder names for a Document (ADR-0008): each resolved
+ * from the *lowest-id* Document sharing that party's OIB across the full row list, never the
+ * target row's own, possibly drifted, `naziv`. Shared by `fileDocument` and `isAlreadyArchived`
+ * so both derive a Document's Archive location the same way. */
+function resolvePartyNames(target: DocumentRow, rows: readonly DocumentRow[]): PartyNames {
+  const dobavljac = requireSubject(target, 'dobavljac');
+  const kupac = requireSubject(target, 'kupac');
+  return {
+    recipientName: resolvePartyName(candidatesFor(rows, 'kupac', kupac.oib)),
+    issuerName: resolvePartyName(candidatesFor(rows, 'dobavljac', dobavljac.oib)),
+  };
+}
+
+/** ADR-0013's proof, checked only for a Document the Filed set has already said is unfiled —
+ * the cheap answer first. Computes the exact Archive path the same way `fileDocument` would,
+ * from the Portal listing and Settings alone (ADR-0008's name resolution needs no local state),
+ * and asks `downloadRecord` whether every one of that Document's files is already there,
+ * complete and still existing.
+ *
+ * Any field this can't resolve — a missing `kupac` or `brojPriloga`, an OIB with no usable
+ * `naziv` — yields `false` rather than throwing: this check only ever costs an unnecessary
+ * fetch, never a wrongly skipped Document, and a row that genuinely can't be validated still
+ * fails loudly inside `fileDocument`, exactly as before this check existed. */
+function isAlreadyArchived(
+  target: DocumentRow,
+  rows: readonly DocumentRow[],
+  settings: Settings,
+  downloadRecord: DownloadRecord,
+): boolean {
+  try {
+    const brojPriloga = requireNumberField(target, 'brojPriloga');
+    const { recipientName, issuerName } = resolvePartyNames(target, rows);
+    const directory = archiveDirectory({
+      archiveRoot: settings.archiveRoot,
+      recipientName,
+      issuerName,
+      datumIzdavanja: target.datumIzdavanja,
+    });
+    const stem = documentStem(target);
+
+    if (!downloadRecord.has(directory, eracunFilename(stem))) return false;
+    if (!downloadRecord.has(directory, visualisationFilename(stem))) return false;
+    return downloadRecord.countWithPrefix(directory, `${stem}_`) === brojPriloga;
+  } catch {
+    return false;
+  }
+}
+
 /** `fileDocument`'s result, carrying the reporting signals (issue #10) alongside the
  * `FiledDocument` the Run report exposes — kept out of `FiledDocument` itself so its shape,
  * already asserted with `toEqual` in tests, does not have to grow. */
@@ -189,12 +258,9 @@ interface FileOutcome {
 async function fileDocument(target: DocumentRow, rows: readonly DocumentRow[], ports: RunPorts): Promise<FileOutcome> {
   const datumZaprimanja = requireNumberField(target, 'datumZaprimanja');
   const brojPriloga = requireNumberField(target, 'brojPriloga');
-  const dobavljac = requireSubject(target, 'dobavljac');
-  const kupac = requireSubject(target, 'kupac');
+  const { recipientName, issuerName } = resolvePartyNames(target, rows);
 
   const settings = await ports.store.getSettings();
-  const recipientName = resolvePartyName(candidatesFor(rows, 'kupac', kupac.oib));
-  const issuerName = resolvePartyName(candidatesFor(rows, 'dobavljac', dobavljac.oib));
 
   const plan = planFiling(
     {
@@ -299,6 +365,9 @@ export interface RunOptions {
 export async function run(ports: RunPorts, options: RunOptions = {}): Promise<RunReport> {
   const { rows } = await ports.portal.listDocuments();
   await ports.store.pruneEracunCache(ports.clock.now());
+  // Queried once per Run and indexed here (ADR-0013) — never re-queried inside the loop below.
+  const downloadRecord = await ports.downloadRecord.load();
+  const settings = await ports.store.getSettings();
 
   const portal = throttled(ports.portal, ports.delay);
   const runPorts: RunPorts = { ...ports, portal };
@@ -321,6 +390,18 @@ export async function run(ports: RunPorts, options: RunOptions = {}): Promise<Ru
 
   for (const row of targetRows) {
     if (await ports.store.isFiled(row.id)) {
+      skipped.push(row.id);
+      progress.skipped += 1;
+      emitProgress();
+      continue;
+    }
+
+    // Checked only once the Filed set has already said this Document is unfiled — the cheap
+    // answer first (ADR-0013). A Document provably already in the Archive is marked Filed here,
+    // without a Portal request ever being made for it, and joins the same `skipped` list as one
+    // skipped for being already Filed.
+    if (isAlreadyArchived(row, rows, settings, downloadRecord)) {
+      await ports.store.markFiled(row.id, ports.clock.now());
       skipped.push(row.id);
       progress.skipped += 1;
       emitProgress();

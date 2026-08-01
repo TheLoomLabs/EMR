@@ -6,6 +6,7 @@ import { composeBundle, planBundle, type BundleMonth, type BundlePlan, type Bund
 import { bundleFilename, bundleMonthLabel, bundleSubject, isReachableBundleMonth, MONTH_NAMES, reachableYearRange } from '@/utils/bundle';
 import { systemClock } from '@/utils/clock';
 import { systemDelay } from '@/utils/delay';
+import { DownloadsRecordPort } from '@/utils/download-record';
 import { DownloadsEmlWriterPort } from '@/utils/eml-writer';
 import { archiveDirectory, zagrebDate } from '@/utils/filing';
 import type {
@@ -751,6 +752,7 @@ async function preuzmi(documentIds?: readonly number[]): Promise<void> {
         store: { getSettings, isFiled, markFiled, cacheEracun, pruneEracunCache },
         clock: systemClock,
         delay: systemDelay,
+        downloadRecord: new DownloadsRecordPort(),
       },
       {
         documentIds,
