@@ -238,21 +238,32 @@ async function fileDocument(target: DocumentRow, rows: readonly DocumentRow[], p
   };
 }
 
-/** Wraps `portal.exportDocument` so a pause lands between one Export finishing and the next one
- * starting — never before the first one, and never for a Document skipped or failed before an
+/** Wraps an `exportDocument` function so a pause lands between one Export finishing and the next
+ * one starting — never before the first one, and never for a Document skipped or failed before an
  * Export was ever requested for it. Ties the throttle strictly to the network operation the
- * Portal actually feels, not to how many Documents the Run happens to walk past. */
-function throttled(portal: RunPortalPort, delay: Delay): RunPortalPort {
+ * Portal actually feels, not to how many Documents a caller happens to walk past.
+ *
+ * Exported so Bundle planning's Send-time recovery fetch (issue #31, ADR-0012) can throttle its
+ * own Export calls through this same mechanism and constant, rather than growing a second one —
+ * both are hitting the same government portal. */
+export function throttleExports(
+  exportDocument: (id: number) => Promise<ArrayBuffer>,
+  delay: Delay,
+): (id: number) => Promise<ArrayBuffer> {
   let exportedAny = false;
+  return async (id: number) => {
+    if (exportedAny) {
+      await delay.wait(EXPORT_DELAY_MS);
+    }
+    exportedAny = true;
+    return exportDocument(id);
+  };
+}
+
+function throttled(portal: RunPortalPort, delay: Delay): RunPortalPort {
   return {
     listDocuments: () => portal.listDocuments(),
-    async exportDocument(id) {
-      if (exportedAny) {
-        await delay.wait(EXPORT_DELAY_MS);
-      }
-      exportedAny = true;
-      return portal.exportDocument(id);
-    },
+    exportDocument: throttleExports((id) => portal.exportDocument(id), delay),
   };
 }
 

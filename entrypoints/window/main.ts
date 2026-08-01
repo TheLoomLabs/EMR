@@ -2,7 +2,7 @@ import { parseAccountantAddresses } from '@/utils/accountant';
 import { DownloadsArchivePort } from '@/utils/archive';
 import type { BackfillPlan, BackfillPort } from '@/utils/backfill';
 import { planBackfill } from '@/utils/backfill';
-import { composeBundle, planBundle, type BundleMonth, type BundlePlan, type BundlePortalPort } from '@/utils/bundle';
+import { composeBundle, planBundle, type BundleMonth, type BundlePlan, type BundlePlanProgress, type BundlePortalPort } from '@/utils/bundle';
 import { bundleFilename, bundleMonthLabel, bundleSubject, isReachableBundleMonth, MONTH_NAMES, reachableYearRange } from '@/utils/bundle';
 import { systemClock } from '@/utils/clock';
 import { systemDelay } from '@/utils/delay';
@@ -185,6 +185,14 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
               <div class="actions">
                 <button id="posalji" class="btn btn-primary">Prepare message</button>
               </div>
+
+              <div class="progress" id="bundle-progress" hidden>
+                <div class="track"><div class="fill" id="bundle-progress-fill" style="width: 0%"></div></div>
+                <div class="legend">
+                  <span class="now" id="bundle-progress-now"></span>
+                  <span class="tally" id="bundle-progress-tally"></span>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -326,6 +334,10 @@ const bundleOfferText = document.querySelector<HTMLElement>('#bundle-offer-text'
 const bundleComposeButton = document.querySelector<HTMLButtonElement>('#bundle-compose')!;
 const bundleCancelButton = document.querySelector<HTMLButtonElement>('#bundle-cancel')!;
 const bundleStatus = document.querySelector<HTMLParagraphElement>('#bundle-status')!;
+const bundleProgressEl = document.querySelector<HTMLDivElement>('#bundle-progress')!;
+const bundleProgressFillEl = document.querySelector<HTMLDivElement>('#bundle-progress-fill')!;
+const bundleProgressNowEl = document.querySelector<HTMLSpanElement>('#bundle-progress-now')!;
+const bundleProgressTallyEl = document.querySelector<HTMLSpanElement>('#bundle-progress-tally')!;
 
 const portalStatusEl = document.querySelector<HTMLDivElement>('#portal-status')!;
 const portalStatusText = document.querySelector<HTMLSpanElement>('#portal-status-text')!;
@@ -814,9 +826,13 @@ retryButton.addEventListener('click', () => {
   void preuzmi(lastReport.failed.map((failure) => failure.documentId));
 });
 
-/** `relayBackfillPort`'s shape — `listDocuments(filterParams)` — is exactly what `planBundle`
- * needs too (utils/bundle.ts's `BundlePortalPort`), so the same relay serves both. */
-const relayBundlePort: BundlePortalPort = relayBackfillPort;
+/** `relayBackfillPort`'s `listDocuments(filterParams)` and `relayPortalPort`'s `exportDocument`
+ * together are exactly what `planBundle` needs (utils/bundle.ts's `BundlePortalPort`) — the
+ * latter is planBundle's ADR-0012 recovery fetch, the same relay `run()` already uses for it. */
+const relayBundlePort: BundlePortalPort = {
+  listDocuments: relayBackfillPort.listDocuments,
+  exportDocument: relayPortalPort.exportDocument,
+};
 
 /** The month picker (issue #29): a trigger button opening a panel with a year stepper and a
  * twelve-month grid, replacing `<input type="month">` — unimplemented on Firefox, where it
@@ -919,6 +935,18 @@ function hideBundleOffer(): void {
   pendingBundlePlan = null;
 }
 
+/** Live progress for planBundle's ADR-0012 recovery fetch (issue #31) — the same treatment
+ * Download's own progress bar gives a Run (`renderProgress` above), scaled to what planning
+ * reports: no percentage denominator beyond `total`/`fetched`, since there is no skip/fail split
+ * here, only "fetched so far" against "how many the cache was missing". Never called at all for a
+ * fully warm month (planBundle's own contract — nothing is fetched, so `total` is never 0 here). */
+function renderBundleProgress(progress: BundlePlanProgress): void {
+  const percent = Math.round((progress.fetched / progress.total) * 100);
+  bundleProgressFillEl.style.width = `${percent}%`;
+  bundleProgressNowEl.textContent = progress.current ? `Recovering ${progress.current.broj} · ${progress.current.issuerName}` : '';
+  bundleProgressTallyEl.textContent = `${progress.fetched} / ${progress.total} recovered from the Portal`;
+}
+
 /** Send (CONTEXT.md "Bundle"; ADR-0003): plans a month's Bundle and shows its total size before
  * anything is composed (issue #12's acceptance), mirroring the backfill offer's plan-then-confirm
  * shape above. A missing Accountant address reads as a setup gap pointing at Settings, not an
@@ -936,6 +964,7 @@ posaljiButton.addEventListener('click', async () => {
   accountantMissing.hidden = true;
   hideBundleOffer();
   bundleStatus.textContent = 'Checking…';
+  bundleProgressEl.hidden = true;
   try {
     // Checked here, not just left for composeBundle to embed an empty To: — settings.accountantEmails
     // is what the acceptance criterion means by "the recipient address ... come[s] from settings",
@@ -947,7 +976,17 @@ posaljiButton.addEventListener('click', async () => {
       return;
     }
 
-    const plan = await planBundle(relayBundlePort, { getCachedEracun }, month);
+    const plan = await planBundle(
+      { portal: relayBundlePort, store: { getCachedEracun, cacheEracun }, clock: systemClock, delay: systemDelay },
+      month,
+      {
+        onProgress: (progress) => {
+          bundleStatus.textContent = '';
+          bundleProgressEl.hidden = false;
+          renderBundleProgress(progress);
+        },
+      },
+    );
     if (plan.documents.length === 0) {
       bundleStatus.textContent = formatBundleOffer(plan);
       return;
@@ -959,6 +998,7 @@ posaljiButton.addEventListener('click', async () => {
   } catch (error) {
     bundleStatus.textContent = `Error: ${(error as Error).message}`;
   } finally {
+    bundleProgressEl.hidden = true;
     setButtonBusy(posaljiButton, false);
   }
 });

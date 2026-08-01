@@ -122,9 +122,11 @@ interface CachedEracun {
 }
 
 /** The eRačun XML cache (issue #1's Implementation Decisions → State; issue #9): bytes cached
- * at download time, keyed by Document `id`, pruned after 24 months. Not an optimisation — trap
- * 1 means the extension can never read the Archive back, so this cache is the only way the
- * Bundle (a later issue) can ever get an already-filed Document's XML bytes.
+ * at download time, keyed by Document `id`, pruned after 24 months. An optimisation, not the
+ * only surviving copy (ADR-0012) — trap 1 means the extension can never read the Archive back,
+ * but the Portal can be read back, and still holds every Export. A Bundle (utils/bundle.ts) that
+ * finds no entry here fetches the Export fresh instead of refusing; this cache only makes that
+ * fast path instant rather than throttled.
  *
  * One storage item per Document id, not one item holding every entry — this cache runs to the
  * "low hundreds of MB" over 24 months (docs/portal-api.md), and a single-blob item would mean

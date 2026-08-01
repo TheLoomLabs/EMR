@@ -1,19 +1,26 @@
 // The Bundle (issue #12; CONTEXT.md "Bundle"; ADR-0003): one calendar month of one Recipient,
 // composed into a `.eml`. Never derived from send history — a re-send is possible and harmless
 // (CONTEXT.md) — so this always recomputes from the Portal's current list plus the local eRačun
-// cache (utils/store.ts), the only place a Filed Document's XML bytes survive (trap 1).
+// cache (utils/store.ts). The cache is a fast path, not the only surviving copy (ADR-0012): a
+// Document the cache has no entry for has its Export fetched from the Portal instead, right here
+// during planning, rather than refusing.
 //
 // Two steps, mirroring utils/backfill.ts's plan/act split: `planBundle` queries the Portal for
 // roughly the month (docs/portal-api.md, "kraj works"), narrows to the exact Zagreb month
-// (trap 8), and reports the attachment set and its total size *before* anything is composed —
-// the acceptance criterion that exists because a 44-Document month runs to ~7 MB (HANDOFF).
-// `composeBundle` then turns that plan into `.eml` bytes via utils/eml.ts, which is pure and
-// tested on its own.
+// (trap 8), fills in any cache misses from the Portal (ADR-0012), and reports the attachment set
+// and its total size *before* anything is composed — the acceptance criterion that exists because
+// a 44-Document month runs to ~7 MB (HANDOFF), and only honest once every byte is already in
+// hand. `composeBundle` then turns that plan into `.eml` bytes via utils/eml.ts, which is pure
+// and tested on its own.
 
 import { ERACUN_RECEIPT_START } from './backfill';
+import type { Clock } from './clock';
+import type { Delay } from './delay';
+import { unpackExport } from './export';
 import { documentStem, eracunFilename, sanitizeSegment, zagrebDate } from './filing';
 import { assembleEml } from './eml';
-import { widenedFilterParams, withinZagrebWindow, type FilterParams, type ListDocumentsResult, type ZagrebWindow } from './portal';
+import { widenedFilterParams, withinZagrebWindow, type DocumentRow, type FilterParams, type ListDocumentsResult, type ZagrebWindow } from './portal';
+import { throttleExports, type NamedDocument } from './run';
 import type { Settings } from './store';
 
 export class BundleError extends Error {
@@ -29,16 +36,44 @@ export interface BundleMonth {
 }
 
 /** The `portal` port as planBundle sees it: one already-paged, already-validated listing
- * (utils/portal.ts's `listDocuments`), exactly like utils/backfill.ts's `BackfillPort`. The real
- * implementation is the popup's message relay to the Portal's content script (ADR-0005). */
+ * (utils/portal.ts's `listDocuments`), exactly like utils/backfill.ts's `BackfillPort`, plus a
+ * single Document's Export — needed for the ADR-0012 recovery fetch when the cache has no entry.
+ * The real implementation is the popup's message relay to the Portal's content script (ADR-0005),
+ * the same relay `run()` already uses for `exportDocument`. */
 export interface BundlePortalPort {
   listDocuments(filterParams: FilterParams): Promise<ListDocumentsResult>;
+  exportDocument(id: number): Promise<ArrayBuffer>;
 }
 
-/** The `store` port as planBundle sees it: only the eRačun cache, keyed by Document id — the
- * sole surviving copy of an already-Filed Document's XML bytes (trap 1, utils/store.ts). */
+/** The `store` port as planBundle sees it: the eRačun cache, keyed by Document id (utils/store.ts)
+ * — a fast path, not the only surviving copy (ADR-0012). `cacheEracun` writes back a Document
+ * recovered from the Portal, so a second Send of the same month finds it warm. */
 export interface BundleStore {
   getCachedEracun(id: number): Promise<Uint8Array | undefined>;
+  cacheEracun(id: number, bytes: Uint8Array, cachedAt: number): Promise<void>;
+}
+
+export interface BundlePorts {
+  portal: BundlePortalPort;
+  store: BundleStore;
+  clock: Clock;
+  delay: Delay;
+}
+
+/** A live snapshot of planning's ADR-0012 recovery fetch: which Document's Export is being
+ * fetched right now (`null` between fetches, named the same way `run()`'s own progress does —
+ * `NamedDocument`, utils/run.ts — by `broj` and Issuer, never a bare id), a running count of how
+ * many of `total` are done, and `total` itself — the number of Documents in the month the cache
+ * had no entry for. Never called at all for a month whose cache is fully warm, since nothing is
+ * fetched (acceptance: the warm case must not regress). */
+export interface BundlePlanProgress {
+  total: number;
+  current: NamedDocument | null;
+  fetched: number;
+}
+
+export interface BundlePlanOptions {
+  onProgress?: (progress: BundlePlanProgress) => void;
 }
 
 export interface BundleDocument {
@@ -134,26 +169,74 @@ function dedupeFilename(filename: string, issuerOib: string, used: Set<string>):
   return deduped;
 }
 
+/** Fetches and unpacks one Document's Export, keeping only its eRačun bytes — the visualisation
+ * and any Prilozi a Send-time Export also carries are discarded (ADR-0012: `Filed` means every
+ * one of a Document's files is in the Archive, and a Send-time fetch writes to the Archive at
+ * all). Throws `BundleError`, naming the Document, for anything that goes wrong: a missing
+ * `brojPriloga`, a Portal fetch failure, or an Export that fails validation — planning must never
+ * let one of these through as a silently short invoice. */
+async function recoverEracun(row: DocumentRow, exportDocument: (id: number) => Promise<ArrayBuffer>): Promise<Uint8Array> {
+  try {
+    if (typeof row.brojPriloga !== 'number') {
+      throw new Error('missing numeric field brojPriloga');
+    }
+    const exportBytes = await exportDocument(row.id);
+    return unpackExport(exportBytes, row.brojPriloga).eracun;
+  } catch (error) {
+    throw new BundleError(`Document ${row.id} (${row.brojDokumenta}) could not be supplied by the Portal: ${(error as Error).message}`);
+  }
+}
+
 /** Plans a Bundle: queries the Portal's bounded, widened window for `month`, narrows back to the
- * exact Zagreb month client-side, and reads each Document's cached eRačun XML bytes — never
- * fetching a fresh Export, since only the cache survives a Document once Filed (trap 1). A
- * Document the cache has no entry for fails loudly rather than being silently dropped: it means
- * Download was never run for it, and a Bundle missing an invoice with no sign of the gap is
- * exactly the failure mode this project treats as unacceptable (HANDOFF, trap 6's spirit). */
-export async function planBundle(port: BundlePortalPort, store: BundleStore, month: BundleMonth): Promise<BundlePlan> {
+ * exact Zagreb month client-side, and reads each Document's eRačun XML bytes. The cache
+ * (`ports.store`) is checked first for every Document; a miss fetches that Document's Export from
+ * the Portal instead of refusing (ADR-0012 — the cache is a fast path, not the only surviving
+ * copy of a Filed Document's bytes). Recovered bytes are written back to the cache before
+ * `planBundle` returns, so a second Send of the same month finds it warm. Every recovery fetch is
+ * throttled through the same mechanism and constant `run()` uses (utils/run.ts's
+ * `throttleExports`) — this is a government portal, and Send must never look like it is hammering
+ * it any more than Download does. `options.onProgress`, when given, is called as each recovery
+ * fetch starts and finishes, so a slow, cold Send does not look frozen; it is never called at all
+ * when the cache is fully warm, since nothing is fetched. */
+export async function planBundle(ports: BundlePorts, month: BundleMonth, options: BundlePlanOptions = {}): Promise<BundlePlan> {
   const window = bundleWindow(month);
   const filterParams = widenedFilterParams(window);
-  const { rows } = await port.listDocuments(filterParams);
+  const { rows } = await ports.portal.listDocuments(filterParams);
   const withinMonth = rows.filter((row) => withinZagrebWindow(row.datumIzdavanja, window));
+
+  const eracunBytes = new Map<number, Uint8Array>();
+  const missing: DocumentRow[] = [];
+  for (const row of withinMonth) {
+    const bytes = await ports.store.getCachedEracun(row.id);
+    if (bytes === undefined) {
+      missing.push(row);
+    } else {
+      eracunBytes.set(row.id, bytes);
+    }
+  }
+
+  const throttledExportDocument = throttleExports((id) => ports.portal.exportDocument(id), ports.delay);
+  const progress: BundlePlanProgress = { total: missing.length, current: null, fetched: 0 };
+  const emitProgress = () => options.onProgress?.({ ...progress });
+
+  for (const row of missing) {
+    progress.current = { documentId: row.id, broj: row.brojDokumenta, issuerName: row.dobavljac.naziv };
+    emitProgress();
+
+    const bytes = await recoverEracun(row, throttledExportDocument);
+    await ports.store.cacheEracun(row.id, bytes, ports.clock.now());
+    eracunBytes.set(row.id, bytes);
+
+    progress.fetched += 1;
+    progress.current = null;
+    emitProgress();
+  }
 
   const documents: BundleDocument[] = [];
   const usedFilenames = new Set<string>();
 
   for (const row of withinMonth) {
-    const bytes = await store.getCachedEracun(row.id);
-    if (bytes === undefined) {
-      throw new BundleError(`Document ${row.id} (${row.brojDokumenta}) has no cached eRačun XML — run Download before sending.`);
-    }
+    const bytes = eracunBytes.get(row.id)!;
     const stem = documentStem({ brojDokumenta: row.brojDokumenta, datumIzdavanja: row.datumIzdavanja, vrstaDokumenta: row.vrstaDokumenta });
     const filename = dedupeFilename(eracunFilename(stem), row.dobavljac.oib, usedFilenames);
     documents.push({ documentId: row.id, filename, bytes });
