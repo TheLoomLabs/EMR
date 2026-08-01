@@ -187,13 +187,18 @@ function bundleBody(plan: BundlePlan): string {
   return `U prilogu se nalazi ${plan.documents.length} eRačuna za ${formatBundleMonth(plan.month)}.`;
 }
 
-/** Turns a `BundlePlan` into `.eml` bytes: the Accountant address and subject come from
- * `settings` (issue #12's acceptance), the attachments come straight from the plan, byte-for-
- * byte (never re-serialised — ADR-0003, trap 9). Pure given the plan; all the impure work
- * (the Portal query, the cache reads) already happened in `planBundle`. */
-export function composeBundle(plan: BundlePlan, settings: Pick<Settings, 'accountantEmail' | 'subjectTemplate'>): Uint8Array {
+/** Turns a `BundlePlan` into `.eml` bytes: every Accountant address and the subject come from
+ * `settings` (issue #12's acceptance, extended by issue #30), the attachments come straight from
+ * the plan, byte-for-byte (never re-serialised — ADR-0003, trap 9). Pure given the plan; all the
+ * impure work (the Portal query, the cache reads) already happened in `planBundle`.
+ *
+ * Every address is joined into the one `To:` header as an equal addressee of the same message —
+ * there is no `Cc` or `Bcc`, because the Accountant is one party reachable in several places
+ * (CONTEXT.md), not several parties. A single address joins to exactly the header it produced
+ * before this list existed. */
+export function composeBundle(plan: BundlePlan, settings: Pick<Settings, 'accountantEmails' | 'subjectTemplate'>): Uint8Array {
   return assembleEml({
-    to: settings.accountantEmail,
+    to: settings.accountantEmails.join(', '),
     subject: bundleSubject(settings.subjectTemplate, plan.month),
     body: bundleBody(plan),
     attachments: plan.documents.map((doc) => ({ filename: doc.filename, bytes: doc.bytes })),

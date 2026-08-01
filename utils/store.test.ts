@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fakeBrowser } from 'wxt/testing';
 import { storage } from '#imports';
 import {
@@ -25,7 +25,7 @@ describe('getSettings', () => {
 });
 
 const sample: Settings = {
-  accountantEmail: 'knjigovodstvo@primjer.hr',
+  accountantEmails: ['knjigovodstvo@primjer.hr'],
   subjectTemplate: 'eRačuni - {mjesec}/{godina}',
   archiveRoot: 'Poslovna arhiva',
 };
@@ -41,6 +41,54 @@ describe('setSettings', () => {
     await setSettings(sample);
 
     expect(await storage.getItem('local:settings')).toEqual(sample);
+  });
+});
+
+describe('accountantEmail -> accountantEmails migration (issue #30)', () => {
+  // `storage.defineItem` migrates once, at the moment the item is defined (store.ts's module
+  // top level) — so a migration test has to seed the pre-migration shape into fake storage
+  // *before* a fresh copy of the module is imported, not merely before calling getSettings.
+  async function freshStoreAfterSeeding(seed: unknown): Promise<typeof import('./store')> {
+    if (seed !== undefined) {
+      await storage.setItem('local:settings', seed);
+    }
+    vi.resetModules();
+    return import('./store');
+  }
+
+  it('migrates an existing single-address install to a one-element list, with no user action', async () => {
+    const { getSettings: freshGetSettings } = await freshStoreAfterSeeding({
+      accountantEmail: 'knjigovodstvo@primjer.hr',
+      subjectTemplate: 'eRačuni',
+      archiveRoot: 'Arhiva',
+    });
+
+    expect(await freshGetSettings()).toEqual({
+      accountantEmails: ['knjigovodstvo@primjer.hr'],
+      subjectTemplate: 'eRačuni',
+      archiveRoot: 'Arhiva',
+    });
+  });
+
+  it('migrates an existing empty-address install to an empty list', async () => {
+    const { getSettings: freshGetSettings } = await freshStoreAfterSeeding({
+      accountantEmail: '',
+      subjectTemplate: 'eRačuni',
+      archiveRoot: 'Arhiva',
+    });
+
+    expect(await freshGetSettings()).toEqual({
+      accountantEmails: [],
+      subjectTemplate: 'eRačuni',
+      archiveRoot: 'Arhiva',
+    });
+  });
+
+  it('leaves a fresh install (nothing ever saved) at the ordinary empty-list default', async () => {
+    const { getSettings: freshGetSettings, DEFAULT_SETTINGS: freshDefaults } = await freshStoreAfterSeeding(undefined);
+
+    expect(await freshGetSettings()).toEqual(freshDefaults);
+    expect(freshDefaults.accountantEmails).toEqual([]);
   });
 });
 

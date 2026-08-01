@@ -208,7 +208,7 @@ class PagingFakeRunPortalPort implements RunPortalPort {
   }
 }
 
-const settings: Settings = { accountantEmail: '', subjectTemplate: 'eRačuni', archiveRoot: 'Arhiva' };
+const settings: Settings = { accountantEmails: [], subjectTemplate: 'eRačuni', archiveRoot: 'Arhiva' };
 
 function ports(overrides: Partial<RunPorts> = {}): RunPorts {
   return {

@@ -228,7 +228,7 @@ describe('composeBundle', () => {
     };
 
     const eml = new TextDecoder('utf-8').decode(
-      composeBundle(plan, { accountantEmail: 'knjigovoda@example.com', subjectTemplate: 'eRačuni' }),
+      composeBundle(plan, { accountantEmails: ['knjigovoda@example.com'], subjectTemplate: 'eRačuni' }),
     );
 
     expect(eml).toContain('To: knjigovoda@example.com\r\n');
@@ -239,7 +239,7 @@ describe('composeBundle', () => {
     const plan = { month: JULY, documents: [], totalSizeBytes: 0 };
 
     const eml = new TextDecoder('utf-8').decode(
-      composeBundle(plan, { accountantEmail: 'knjigovoda@example.com', subjectTemplate: 'eRačuni' }),
+      composeBundle(plan, { accountantEmails: ['knjigovoda@example.com'], subjectTemplate: 'eRačuni' }),
     );
 
     expect(eml).toContain('To: knjigovoda@example.com\r\n');
@@ -250,11 +250,23 @@ describe('composeBundle', () => {
     const original = new Uint8Array([0x3c, 0x53, 0x00, 0xff, 0x10]);
     const plan = { month: JULY, documents: [{ documentId: 1, filename: 'a.xml', bytes: original }], totalSizeBytes: original.length };
 
-    const eml = new TextDecoder('utf-8').decode(composeBundle(plan, { accountantEmail: 'a@example.com', subjectTemplate: 'x' }));
+    const eml = new TextDecoder('utf-8').decode(composeBundle(plan, { accountantEmails: ['a@example.com'], subjectTemplate: 'x' }));
     const body = eml.split('Content-Disposition: attachment; filename="a.xml"\r\n\r\n')[1];
     const encoded = body.split(/\r\n--/)[0].replace(/\r\n/g, '');
     const decoded = Uint8Array.from(atob(encoded), (c) => c.charCodeAt(0));
 
     expect(decoded).toEqual(original);
+  });
+
+  it('addresses every Accountant address as an equal addressee of the one message — no Cc, no Bcc (ADR-0003, issue #30)', () => {
+    const plan = { month: JULY, documents: [], totalSizeBytes: 0 };
+
+    const eml = new TextDecoder('utf-8').decode(
+      composeBundle(plan, { accountantEmails: ['ana@example.com', 'ivo@example.com'], subjectTemplate: 'eRačuni' }),
+    );
+
+    expect(eml).toContain('To: ana@example.com, ivo@example.com\r\n');
+    expect(eml).not.toMatch(/^Cc:/m);
+    expect(eml).not.toMatch(/^Bcc:/m);
   });
 });

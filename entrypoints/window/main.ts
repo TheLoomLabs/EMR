@@ -1,3 +1,4 @@
+import { parseAccountantAddresses } from '@/utils/accountant';
 import { DownloadsArchivePort } from '@/utils/archive';
 import type { BackfillPlan, BackfillPort } from '@/utils/backfill';
 import { planBackfill } from '@/utils/backfill';
@@ -220,9 +221,9 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
             <div class="card-head"><h2>Accountant</h2></div>
             <div class="card-body">
               <div class="field">
-                <label for="accountantEmail">Email address</label>
-                <input type="email" id="accountantEmail" name="accountantEmail" />
-                <div class="hint">The address the composed message is addressed to.</div>
+                <label for="accountantEmail">Email address(es)</label>
+                <input type="text" id="accountantEmail" name="accountantEmail" />
+                <div class="hint">Separate several addresses with commas — every Bundle is addressed to all of them.</div>
               </div>
               <div class="field">
                 <label for="subjectTemplate">Subject template</label>
@@ -936,11 +937,11 @@ posaljiButton.addEventListener('click', async () => {
   hideBundleOffer();
   bundleStatus.textContent = 'Checking…';
   try {
-    // Checked here, not just left for composeBundle to embed an empty To: — settings.accountantEmail
+    // Checked here, not just left for composeBundle to embed an empty To: — settings.accountantEmails
     // is what the acceptance criterion means by "the recipient address ... come[s] from settings",
-    // and a blank one is a setup gap the user can fix in Settings, not something to compose past.
+    // and an empty list is a setup gap the user can fix in Settings, not something to compose past.
     const settings = await getSettings();
-    if (!settings.accountantEmail) {
+    if (settings.accountantEmails.length === 0) {
       bundleStatus.textContent = '';
       accountantMissing.hidden = false;
       return;
@@ -1031,7 +1032,7 @@ function updateArchivePreview(): void {
 
 async function loadSettings(): Promise<void> {
   const settings = await getSettings();
-  accountantEmailInput.value = settings.accountantEmail;
+  accountantEmailInput.value = settings.accountantEmails.join(', ');
   subjectTemplateInput.value = settings.subjectTemplate;
   archiveRootInput.value = settings.archiveRoot;
   updateSubjectPreview();
@@ -1041,12 +1042,26 @@ async function loadSettings(): Promise<void> {
 subjectTemplateInput.addEventListener('input', updateSubjectPreview);
 archiveRootInput.addEventListener('input', updateArchivePreview);
 
+/** Parses the Accountant field on save, not before (issue #30): an entry that is not an email
+ * address blocks the save, named in the error, and — because parsing happens before
+ * `setSettings` is ever called — leaves whatever was previously stored in force rather than
+ * losing an address to a bad edit. */
 settingsForm.addEventListener('submit', async (event) => {
   event.preventDefault();
+  settingsStatus.textContent = '';
+
+  let accountantEmails: string[];
+  try {
+    accountantEmails = parseAccountantAddresses(accountantEmailInput.value);
+  } catch (error) {
+    settingsStatus.textContent = `Error: ${(error as Error).message}`;
+    return;
+  }
+
   setButtonBusy(settingsSaveButton, true);
   try {
     await setSettings({
-      accountantEmail: accountantEmailInput.value,
+      accountantEmails,
       subjectTemplate: subjectTemplateInput.value,
       archiveRoot: archiveRootInput.value,
     });

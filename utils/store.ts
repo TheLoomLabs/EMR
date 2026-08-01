@@ -5,21 +5,42 @@
 import type { WindowRect } from './window-geometry';
 
 export interface Settings {
-  accountantEmail: string;
+  /** Every address the Accountant is reachable at (CONTEXT.md "Accountant") — one party, several
+   * possible addresses, all addressees of the same Bundle message (issue #30). Parsed once, at
+   * save time, by utils/accountant.ts's `parseAccountantAddresses`; nothing downstream ever
+   * parses the raw Settings field. */
+  accountantEmails: string[];
   subjectTemplate: string;
   archiveRoot: string;
 }
 
 /** A user who sets nothing can still complete a Run: Preuzmi only needs archiveRoot.
- * accountantEmail defaults empty — it's needed only for Pošalji, a separate button. */
+ * accountantEmails defaults empty — it's needed only for Pošalji, a separate button. */
 export const DEFAULT_SETTINGS: Settings = {
-  accountantEmail: '',
+  accountantEmails: [],
   subjectTemplate: 'eRačuni',
   archiveRoot: 'Arhiva',
 };
 
+/** The pre-#30 shape, kept only for the v2 migration below to read. */
+interface SettingsV1 {
+  accountantEmail: string;
+  subjectTemplate: string;
+  archiveRoot: string;
+}
+
 const settingsItem = storage.defineItem<Settings>('local:settings', {
   fallback: DEFAULT_SETTINGS,
+  version: 2,
+  migrations: {
+    // A stored single address becomes a one-element list, an empty one becomes an empty list —
+    // no user re-enters anything (issue #30's acceptance).
+    2: (old: SettingsV1): Settings => ({
+      accountantEmails: old.accountantEmail ? [old.accountantEmail] : [],
+      subjectTemplate: old.subjectTemplate,
+      archiveRoot: old.archiveRoot,
+    }),
+  },
 });
 
 export function getSettings(): Promise<Settings> {
