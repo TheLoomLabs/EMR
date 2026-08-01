@@ -25,8 +25,8 @@ EMR opens its own window from the toolbar icon, with three sections:
 - **Send** — composes one calendar month of already-filed Documents into a `.eml` (the
   original eRačun XMLs, byte-for-byte) addressed to your accountant, and opens it in your
   default mail client. Nothing is sent until you press send there.
-- **Settings** — the accountant's email address, the subject template, and the Archive's root
-  folder name.
+- **Settings** — one or more accountant email addresses (every Bundle goes to all of them), the
+  subject template, and the Archive's root folder name.
 
 A few things are true throughout:
 
