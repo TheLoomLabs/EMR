@@ -40,7 +40,7 @@ describe('DownloadsEmlWriterPort', () => {
     const port = new DownloadsEmlWriterPort();
     const bytes = new TextEncoder().encode('MIME-Version: 1.0\r\n');
 
-    const write = port.writeAndOpen('eRačuni 07-2026.eml', bytes);
+    const write = port.write('eRačuni 07-2026.eml', bytes);
     await downloads.settle({ id: 1, state: { current: 'complete' } });
     await write;
 
@@ -57,30 +57,29 @@ describe('DownloadsEmlWriterPort', () => {
     const port = new DownloadsEmlWriterPort();
     const revokeObjectURL = vi.spyOn(URL, 'revokeObjectURL');
 
-    const write = port.writeAndOpen('x.eml', new TextEncoder().encode('x'));
+    const write = port.write('x.eml', new TextEncoder().encode('x'));
     await downloads.settle({ id: 1, state: { current: 'complete' } });
     await write;
 
     expect(revokeObjectURL).toHaveBeenCalledTimes(1);
   });
 
-  it('opens the download once it completes, so the mail client presents it ready to go (ADR-0003)', async () => {
+  it('resolves the download id once the download completes, but never opens it itself', async () => {
     const downloads = stubDownloads(7);
     const port = new DownloadsEmlWriterPort();
 
-    const write = port.writeAndOpen('x.eml', new TextEncoder().encode('x'));
+    const write = port.write('x.eml', new TextEncoder().encode('x'));
     await downloads.settle({ id: 7, state: { current: 'complete' } });
-    await write;
 
-    expect(downloads.open).toHaveBeenCalledTimes(1);
-    expect(downloads.open).toHaveBeenCalledWith(7);
+    await expect(write).resolves.toBe(7);
+    expect(downloads.open).not.toHaveBeenCalled();
   });
 
-  it('rejects and never opens when the download is interrupted', async () => {
+  it('rejects when the download is interrupted', async () => {
     const downloads = stubDownloads();
     const port = new DownloadsEmlWriterPort();
 
-    const write = port.writeAndOpen('failing.eml', new TextEncoder().encode('x'));
+    const write = port.write('failing.eml', new TextEncoder().encode('x'));
     const assertion = expect(write).rejects.toThrow(EmlWriteError);
     await downloads.settle({ id: 1, state: { current: 'interrupted' }, error: { current: 'FILE_FAILED' } });
     await assertion;
@@ -93,8 +92,20 @@ describe('DownloadsEmlWriterPort', () => {
     const port = new DownloadsEmlWriterPort();
     const bytes = new Uint8Array(500_000).fill(65);
 
-    const write = port.writeAndOpen('big.eml', bytes);
+    const write = port.write('big.eml', bytes);
     await downloads.settle({ id: 1, state: { current: 'complete' } });
-    await expect(write).resolves.toBeUndefined();
+    await expect(write).resolves.toBe(1);
+  });
+
+  it('open() calls downloads.open with nothing awaited first, since Firefox only allows it from a user input handler', async () => {
+    const downloads = stubDownloads();
+    const port = new DownloadsEmlWriterPort();
+
+    const open = port.open(7);
+
+    // The call must have already happened synchronously, before this test even awaits anything.
+    expect(downloads.open).toHaveBeenCalledTimes(1);
+    expect(downloads.open).toHaveBeenCalledWith(7);
+    await open;
   });
 });

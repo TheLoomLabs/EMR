@@ -13,7 +13,12 @@ export class EmlWriteError extends Error {
 }
 
 export interface EmlWriterPort {
-  writeAndOpen(filename: string, bytes: Uint8Array): Promise<void>;
+  /** Resolves once the file is on disk, with the id needed to {@link open} it. Deliberately does
+   * not open the file itself — see {@link open}'s doc comment for why the two must stay apart. */
+  write(filename: string, bytes: Uint8Array): Promise<number>;
+  /** Wraps `browser.downloads.open` with nothing awaited first, so the call reaches the browser
+   * while it's still willing to run it — see the doc comment above the real implementation. */
+  open(downloadId: number): Promise<void>;
 }
 
 /** `browser.downloads.download` resolves once Chrome has *started* the download, not once it
@@ -46,7 +51,7 @@ function waitForDownloadToSettle(downloadId: number): Promise<void> {
  * same month overwrites its previous draft rather than accumulating `(1)`, `(2)` copies —
  * consistent with the Bundle being stateless and safe to repeat (CONTEXT.md, "Bundle"). */
 export class DownloadsEmlWriterPort implements EmlWriterPort {
-  async writeAndOpen(filename: string, bytes: Uint8Array): Promise<void> {
+  async write(filename: string, bytes: Uint8Array): Promise<number> {
     const url = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: 'message/rfc822' }));
     try {
       const downloadId = await browser.downloads.download({
@@ -56,9 +61,19 @@ export class DownloadsEmlWriterPort implements EmlWriterPort {
         saveAs: false,
       });
       await waitForDownloadToSettle(downloadId);
-      await browser.downloads.open(downloadId);
+      return downloadId;
     } finally {
       URL.revokeObjectURL(url);
     }
+  }
+
+  /** `downloads.open` throws "may only be called from a user input handler" the moment anything
+   * is awaited first — Firefox drops that privilege as soon as control returns to the event
+   * loop, and both the download and the wait for it to settle in {@link write} do exactly that.
+   * So this must be invoked as the first thing in a fresh click handler, with the id from an
+   * already-finished {@link write} — never chained onto it directly (issue: "downloads.open may
+   * only be called from a user input handler"). */
+  async open(downloadId: number): Promise<void> {
+    await browser.downloads.open(downloadId);
   }
 }

@@ -213,6 +213,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
             <div class="actions">
               <button id="bundle-cancel" class="btn btn-ghost">Cancel</button>
               <button id="bundle-compose" class="btn btn-primary">Compose</button>
+              <button id="bundle-open" class="btn btn-primary" hidden>Open message</button>
             </div>
           </div>
           <p id="bundle-status"></p>
@@ -334,6 +335,7 @@ const bundleOffer = document.querySelector<HTMLDivElement>('#bundle-offer')!;
 const bundleOfferText = document.querySelector<HTMLElement>('#bundle-offer-text')!;
 const bundleComposeButton = document.querySelector<HTMLButtonElement>('#bundle-compose')!;
 const bundleCancelButton = document.querySelector<HTMLButtonElement>('#bundle-cancel')!;
+const bundleOpenButton = document.querySelector<HTMLButtonElement>('#bundle-open')!;
 const bundleStatus = document.querySelector<HTMLParagraphElement>('#bundle-status')!;
 const bundleProgressEl = document.querySelector<HTMLDivElement>('#bundle-progress')!;
 const bundleProgressFillEl = document.querySelector<HTMLDivElement>('#bundle-progress-fill')!;
@@ -931,10 +933,15 @@ monthYearNextButton.addEventListener('click', () => {
 });
 
 let pendingBundlePlan: BundlePlan | null = null;
+let composedDownloadId: number | null = null;
 
 function hideBundleOffer(): void {
   bundleOffer.hidden = true;
   pendingBundlePlan = null;
+  composedDownloadId = null;
+  bundleComposeButton.hidden = false;
+  bundleCancelButton.hidden = false;
+  bundleOpenButton.hidden = true;
 }
 
 /** Live progress for planBundle's ADR-0012 recovery fetch (issue #31) — the same treatment
@@ -1013,6 +1020,8 @@ goToSettingsButton.addEventListener('click', () => {
   accountantEmailInput.focus();
 });
 
+const emlWriter = new DownloadsEmlWriterPort();
+
 bundleComposeButton.addEventListener('click', async () => {
   const plan = pendingBundlePlan;
   if (!plan) return;
@@ -1022,13 +1031,31 @@ bundleComposeButton.addEventListener('click', async () => {
   try {
     const settings = await getSettings();
     const eml = composeBundle(plan, settings);
-    await new DownloadsEmlWriterPort().writeAndOpen(bundleFilename(settings.subjectTemplate, plan.month), eml);
-    bundleStatus.textContent = 'Message composed and opened.';
-    hideBundleOffer();
+    composedDownloadId = await emlWriter.write(bundleFilename(settings.subjectTemplate, plan.month), eml);
+    bundleStatus.textContent = 'Message composed.';
+    bundleComposeButton.hidden = true;
+    bundleCancelButton.hidden = true;
+    bundleOpenButton.hidden = false;
   } catch (error) {
     bundleStatus.textContent = `Error: ${(error as Error).message}`;
   } finally {
     setButtonBusy(bundleComposeButton, false);
+  }
+});
+
+/* `downloads.open` must run with nothing awaited first (utils/eml-writer.ts's `open` doc
+ * comment), so it has to sit behind its own click rather than following straight on from
+ * bundleComposeButton's — that's why the offer swaps to a second button instead of opening
+ * automatically once the write settles. */
+bundleOpenButton.addEventListener('click', async () => {
+  const downloadId = composedDownloadId;
+  if (downloadId === null) return;
+
+  try {
+    await emlWriter.open(downloadId);
+    hideBundleOffer();
+  } catch (error) {
+    bundleStatus.textContent = `Error: ${(error as Error).message}`;
   }
 });
 
