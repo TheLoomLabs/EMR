@@ -1,0 +1,67 @@
+name: CI
+
+# Typechecks, tests and builds both browser targets on every push/PR against main. On a
+# `v*` tag, the release job additionally zips both targets (`npm run zip` / `zip:firefox` —
+# wxt's own packaging, which for Firefox also emits an unminified `-sources.zip`, the bundle
+# AMO review can ask for) and attaches them to a GitHub Release, so a tagged version is always
+# installable without anyone needing a local build.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Typecheck, test, build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run compile
+
+      - run: npm test
+
+      - run: npm run build
+
+      - run: npm run build:firefox
+
+  release:
+    name: Attach release zips
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run zip
+
+      - run: npm run zip:firefox
+
+      - name: Publish GitHub Release with the built zips
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" .output/*.zip \
+            --title "${{ github.ref_name }}" \
+            --generate-notes
