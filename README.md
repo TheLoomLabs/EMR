@@ -42,8 +42,9 @@ A few things are true throughout:
 
 ## Installing
 
-EMR isn't published to the Chrome Web Store or addons.mozilla.org yet — install it from
-source:
+EMR isn't published to the Chrome Web Store or addons.mozilla.org yet. Download the zip for
+your browser from the [latest release](https://github.com/TheLoomLabs/EMR/releases/latest) and
+unzip it, or build from source:
 
 ```
 git clone https://github.com/TheLoomLabs/EMR.git
@@ -52,12 +53,13 @@ npm install
 npm run build             # .output/chrome-mv3, or: npm run build:firefox
 ```
 
-Then load it unpacked:
+Then load the unpacked folder:
 
-- **Chrome**: `chrome://extensions` → enable Developer mode → *Load unpacked* →
-  `.output/chrome-mv3`.
+- **Chrome**: `chrome://extensions` → enable Developer mode → *Load unpacked* → the unzipped
+  `emr-*-chrome` folder (or `.output/chrome-mv3` if built from source).
 - **Firefox**: `about:debugging#/runtime/this-firefox` → *Load Temporary Add-on* → any file
-  inside `.output/firefox-mv3`.
+  inside the unzipped `emr-*-firefox` folder (or `.output/firefox-mv3` if built from source).
+  This only lasts until Firefox restarts, since the extension isn't signed by AMO.
 
 EMR needs a MIKROeRAČUN Portal tab open and signed in — it reads Documents from the Portal
 page itself rather than talking to the Portal's API independently.
