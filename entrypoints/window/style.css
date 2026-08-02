@@ -177,13 +177,7 @@ body {
   width: 26px;
   height: 26px;
   border-radius: var(--radius-s);
-  background: var(--accent);
-  color: var(--on-accent);
-  display: grid;
-  place-items: center;
-  font-size: var(--text-11);
-  font-weight: var(--weight-bold);
-  letter-spacing: var(--tracking-wide);
+  display: block;
 }
 .brand .name {
   font-weight: var(--weight-bold);

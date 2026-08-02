@@ -50,7 +50,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
   <div class="app">
     <aside class="sidebar">
       <div class="brand">
-        <span class="mark">eR</span>
+        <img class="mark" src="/icon/48.png" alt="EMR" />
         <span class="name">EMR</span>
       </div>
 
