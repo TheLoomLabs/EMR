@@ -43,9 +43,13 @@ export function unpackExport(body: ArrayBuffer | Uint8Array, brojPriloga: number
 
   // The response carries no Content-Type — content sniffing will not help, so this is the one
   // check that stands in for it. Also catches a JSON error body served with status 200.
+  //
+  // The failure names what actually arrived (length, first bytes). Without that, an empty body
+  // and a JSON error body read identically in the report, which is exactly what made the Chrome
+  // messaging bug (utils/messages.ts) look like a Portal problem for a whole Run.
   if (bytes[0] !== 0x50 || bytes[1] !== 0x4b) {
     throw new ExportValidationError(
-      'Export body does not begin with a ZIP signature (PK) — not a ZIP, possibly a JSON error body served with status 200',
+      `Export body does not begin with a ZIP signature (PK) — not a ZIP, possibly a JSON error body served with status 200 (${describeBody(bytes)})`,
     );
   }
 
@@ -148,4 +152,17 @@ function assertStandardBusinessDocumentRoot(xml: Uint8Array): void {
       'eRačun XML root element is not StandardBusinessDocument (trap 9) — the Export may not be SBDH-wrapped, or the body is not the eRačun',
     );
   }
+}
+
+/** What arrived instead of a ZIP, said in one clause: how many bytes, and — for a short,
+ * printable body, which is what an error payload is — the body itself, so the report carries the
+ * Portal's own words rather than a guess about them. */
+function describeBody(bytes: Uint8Array): string {
+  if (bytes.length === 0) {
+    return 'body was empty';
+  }
+  const head = new TextDecoder('utf-8').decode(bytes.subarray(0, 200));
+  const printable = /^[\t\n\r\x20-\x7e\u00a0-\uffff]*$/.test(head);
+  const shown = printable ? `starts "${head.slice(0, 120)}"` : `starts with bytes ${[...bytes.subarray(0, 4)].map((b) => b.toString(16).padStart(2, '0')).join(' ')}`;
+  return `${bytes.length} bytes, ${shown}`;
 }

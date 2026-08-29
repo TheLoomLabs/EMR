@@ -82,6 +82,16 @@ describe('unpackExport — failures', () => {
     expect(() => unpackExport(jsonErrorBody, 0)).toThrow(/PK/);
   });
 
+  it('quotes the body it got instead of a ZIP, so the report carries evidence not a guess', () => {
+    const jsonErrorBody = utf8('{"error":"session expired"}');
+
+    expect(() => unpackExport(jsonErrorBody, 0)).toThrow(/27 bytes, starts "\{"error":"session expired"\}"/);
+  });
+
+  it('says an empty body was empty — how a lost Export reads, not a Portal error', () => {
+    expect(() => unpackExport(new Uint8Array(0), 0)).toThrow(/body was empty/);
+  });
+
   it('fails when entry count does not equal 1 + 1 + brojPriloga', () => {
     const zip = buildExportZip(validExportFiles(1));
 

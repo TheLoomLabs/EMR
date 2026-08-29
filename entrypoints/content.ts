@@ -1,5 +1,6 @@
 import { APPTOKEN_EVENT, observeAppToken } from '@/utils/apptoken';
 import {
+  encodeExportBytes,
   isExportDocumentMessage,
   isListDocumentsMessage,
   type ExportDocumentResponse,
@@ -29,7 +30,9 @@ export default defineContentScript({
         if (isExportDocumentMessage(message)) {
           return new HttpPortalPort()
             .exportDocument(message.id)
-            .then((bytes): ExportDocumentResponse => ({ ok: true, bytes }))
+            // Base64, not the ArrayBuffer itself: Chrome JSON-serialises extension messages and
+            // an ArrayBuffer JSON-serialises to `{}` (utils/messages.ts).
+            .then((bytes): ExportDocumentResponse => ({ ok: true, bytes: encodeExportBytes(bytes) }))
             .catch((error): ExportDocumentResponse => ({ ok: false, error: (error as Error).message }));
         }
 

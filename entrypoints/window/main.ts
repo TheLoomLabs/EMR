@@ -9,11 +9,12 @@ import { systemDelay } from '@/utils/delay';
 import { DownloadsRecordPort } from '@/utils/download-record';
 import { DownloadsEmlWriterPort } from '@/utils/eml-writer';
 import { archiveDirectory, zagrebDate } from '@/utils/filing';
-import type {
-  ExportDocumentMessage,
-  ExportDocumentResponse,
-  ListDocumentsMessage,
-  ListDocumentsResponse,
+import {
+  decodeExportBytes,
+  type ExportDocumentMessage,
+  type ExportDocumentResponse,
+  type ListDocumentsMessage,
+  type ListDocumentsResponse,
 } from '@/utils/messages';
 import { groupByIssuer, type IssuerGroup } from '@/utils/portal';
 import { PORTAL_ORIGIN, selectPortalTab } from '@/utils/portal-tab';
@@ -603,7 +604,9 @@ const relayPortalPort: RunPortalPort = {
   async exportDocument(id) {
     const message: ExportDocumentMessage = { type: 'emr:export-document', id };
     const response = await sendToPortal<ExportDocumentResponse>(message);
-    return response.bytes;
+    // The Export crosses the messaging boundary as base64 (utils/messages.ts) — decoded here,
+    // byte-identically, before anything unpacks or writes it.
+    return decodeExportBytes(response.bytes);
   },
 };
 
