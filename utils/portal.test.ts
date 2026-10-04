@@ -65,22 +65,41 @@ describe('listDocuments', () => {
     expect(result.rows.map((r) => r.id)).toEqual([...page1.map((r) => r.id), 50, 51]);
     expect(port.requests).toEqual([
       { start: 0, length: 50, filterParams: {} },
-      { start: 50, length: 50, filterParams: {} },
+      { start: 1, length: 50, filterParams: {} },
     ]);
   });
 
-  it('advances by the rows actually returned, so an unconfirmed cap on length cannot strand rows', async () => {
-    // Simulate a server that silently caps every page at 20 rows regardless of the requested length.
+  it('sends start as a zero-based page index, not a row offset (observed live, 2026-10-04)', async () => {
     const port = new FakePortalPort([
-      { recordsTotal: 45, data: Array.from({ length: 20 }, (_, i) => row({ id: i })) },
-      { recordsTotal: 45, data: Array.from({ length: 20 }, (_, i) => row({ id: 20 + i })) },
-      { recordsTotal: 45, data: Array.from({ length: 5 }, (_, i) => row({ id: 40 + i })) },
+      { recordsTotal: 5, data: [row({ id: 1 }), row({ id: 2 })] },
+      { recordsTotal: 5, data: [row({ id: 3 }), row({ id: 4 })] },
+      { recordsTotal: 5, data: [row({ id: 5 })] },
     ]);
 
-    const result = await listDocuments(port);
+    const result = await listDocuments(port, {}, 2);
 
-    expect(result.rows).toHaveLength(45);
-    expect(port.requests.map((r) => r.start)).toEqual([0, 20, 40]);
+    expect(result.rows.map((r) => r.id)).toEqual([1, 2, 3, 4, 5]);
+    expect(port.requests.map((r) => r.start)).toEqual([0, 1, 2]);
+  });
+
+  it('fails loudly on a short page before recordsTotal is reached, since page-index paging would skip rows', async () => {
+    // A server silently capping length at 20: page index 1 would then mean rows 20–39, not 50–99.
+    const port = new FakePortalPort([
+      { recordsTotal: 45, data: Array.from({ length: 20 }, (_, i) => row({ id: i })) },
+    ]);
+
+    await expect(listDocuments(port)).rejects.toThrow(PortalListError);
+  });
+
+  it('fails loudly when a page repeats a Document already seen, rather than filing duplicates', async () => {
+    // A server that ignored start would serve page 0 again.
+    const page = Array.from({ length: 2 }, (_, i) => row({ id: i }));
+    const port = new FakePortalPort([
+      { recordsTotal: 3, data: page },
+      { recordsTotal: 3, data: [row({ id: 0 })] },
+    ]);
+
+    await expect(listDocuments(port, {}, 2)).rejects.toThrow(PortalListError);
   });
 
   it('treats a genuinely empty inbox as zero rows, not an error', async () => {

@@ -1,5 +1,5 @@
 // The `portal` port (issue #7) — everything about listing Documents that isn't the raw HTTP
-// call itself: paging past page 1 (docs/portal-api.md, "Paging is inferred, not proven"), row
+// call itself: paging past page 1 (docs/portal-api.md, "Paging"), row
 // validation (trap 6 and the five required fields), and widening/narrowing a bounded date
 // window (trap 8, "kraj works — bounded windows are available"). All pure — no fetch, no DOM —
 // so it is testable against a hand-written fake PortalPort rather than the real Portal.
@@ -28,7 +28,7 @@ export interface FilterParams {
 }
 
 export interface SearchRequest {
-  start: number;
+  start: number; // zero-based page index, not a row offset
   length: number;
   filterParams: FilterParams;
 }
@@ -91,21 +91,26 @@ export interface ListDocumentsResult {
   rows: DocumentRow[];
 }
 
-/** Walks every page of the filtered window rather than assuming one request suffices
- * (docs/portal-api.md, "Paging is inferred, not proven"). Advances `start` by however many
- * rows actually came back, not by the requested page size, so an unconfirmed server-side cap
- * on `length` cannot strand rows unread. */
+/** Walks every page of the filtered window rather than assuming one request suffices.
+ *
+ * `start` is a zero-based **page index**, not a row offset: page 2 at `length: 50` is
+ * `start: 1` (docs/portal-api.md, "Paging"). Sending a row offset asks for page 51 and gets an
+ * empty page back. Because the server computes the row offset itself as `start * length`, every
+ * page before the last must come back full — a short one means the server capped `length`, and
+ * the next page index would silently skip rows. That, and a page repeating a Document already
+ * seen, both fail loudly (trap 6). */
 export async function listDocuments(
   port: PortalPort,
   filterParams: FilterParams = {},
   pageSize = DEFAULT_PAGE_SIZE,
 ): Promise<ListDocumentsResult> {
   const rows: DocumentRow[] = [];
-  let start = 0;
+  const seenIds = new Set<number>();
+  let page = 0;
   let recordsTotal: number | undefined;
 
   for (;;) {
-    const response = await port.searchInbound({ start, length: pageSize, filterParams });
+    const response = await port.searchInbound({ start: page, length: pageSize, filterParams });
 
     if (recordsTotal === undefined) {
       recordsTotal = response.recordsTotal;
@@ -117,22 +122,36 @@ export async function listDocuments(
 
     if (response.data.length > pageSize) {
       throw new PortalListError(
-        `page at offset ${start} returned ${response.data.length} rows, more than the requested length ${pageSize} — a parse failure`,
+        `page ${page} returned ${response.data.length} rows, more than the requested length ${pageSize} — a parse failure`,
       );
     }
 
-    if (response.data.length === 0 && start < recordsTotal) {
+    if (response.data.length === 0 && rows.length < recordsTotal) {
       throw new PortalListError(
-        `page at offset ${start} returned zero rows against recordsTotal ${recordsTotal} — a parse failure, not an empty inbox (trap 6)`,
+        `page ${page} returned zero rows with ${rows.length} of recordsTotal ${recordsTotal} read — a parse failure, not an empty inbox (trap 6)`,
       );
     }
 
     for (const raw of response.data) {
-      rows.push(parseRow(raw));
+      const row = parseRow(raw);
+      if (seenIds.has(row.id)) {
+        throw new PortalListError(
+          `page ${page} repeated Document ${row.id} from an earlier page — the Portal is not paging the way we expect`,
+        );
+      }
+      seenIds.add(row.id);
+      rows.push(row);
     }
 
-    start += response.data.length;
-    if (start >= recordsTotal || response.data.length === 0) break;
+    if (rows.length >= recordsTotal) break;
+
+    if (response.data.length < pageSize) {
+      throw new PortalListError(
+        `page ${page} returned ${response.data.length} rows, fewer than the requested length ${pageSize}, with only ${rows.length} of recordsTotal ${recordsTotal} read — the Portal may be capping length, which would make later pages skip rows`,
+      );
+    }
+
+    page += 1;
   }
 
   return { recordsTotal, rows };
