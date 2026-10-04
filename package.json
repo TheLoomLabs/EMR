@@ -2,7 +2,7 @@
   "name": "emr",
   "description": "Files incoming eRačuni from the MIKROeRAČUN Portal and forwards them to the Accountant.",
   "private": true,
-  "version": "0.0.2",
+  "version": "0.0.3",
   "type": "module",
   "license": "AGPL-3.0-or-later",
   "repository": {
